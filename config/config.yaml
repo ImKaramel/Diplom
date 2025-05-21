@@ -1,0 +1,28 @@
+data:
+  raw: data/raw/file2.csv
+  processed: data/processed/clean_data.csv
+  norm_params: data/processed/norm_params.json
+  forecasts: data/forecasts/forecasts.csv
+preprocessing:
+  target_column: A_plus
+  period: 24
+  miss_method: knn
+  anom_method: rf
+  anom_act: interpolate
+  norm_method: minmax
+  k: 5
+  thresh: 2.5
+  rf_n_estimators: 100
+  lookback: 168
+  process_missing: true
+  process_anomalies: true
+  process_normalization: false
+forecasting:
+  horizon: 24
+  arima:
+    auto: true
+    s: 24
+graphics:
+  output_dir: graphics
+logging:
+  log_file: logs/project.log
