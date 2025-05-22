@@ -5,11 +5,6 @@ from sklearn.neighbors import NearestNeighbors
 
 class MissingValueHandler:
     def __init__(self, method='linear', period=24, k=5):
-        """
-        - method: метод заполнения пропусков ('linear', 'seasonal', 'knn')
-        - period: период сезонности для сезонной интерполяции (исходно 24 часа)
-        - k: число соседей для KNN
-        """
         self.method = method
         self.period = period
         self.k = k
@@ -38,7 +33,7 @@ class MissingValueHandler:
                 valid_data = group_data[~mask]
                 missing_data = group_data[mask]
                 if len(valid_data) < self.k:
-                    logging.warning(f"Недостаточно данных для KNN (uuid={group}). Заполнение средним.")
+                    logging.warning(f"Недостаточно данных для KNN (uuid={group}) --- Заполнение средним")
                     df_copy.loc[mask, column] = valid_data[column].mean() if valid_data[column].notna().any() else 0
                     continue
                 X_valid = (valid_data[time_column] - valid_data[time_column].min()).dt.total_seconds().values.reshape(-1, 1)
@@ -54,7 +49,6 @@ class MissingValueHandler:
         return df_copy
 
     def _seasonal_interpolation(self, df, column, groupby, time_column):
-        """Сезонная интерполяция y_t = (1/n) * Σ y_(t-24i)."""
         df_copy = df.copy()
         for group in df_copy[groupby].unique():
             group_mask = df_copy[groupby] == group
@@ -79,9 +73,15 @@ class MissingValueHandler:
         if not isinstance(df, pd.DataFrame):
             raise ValueError("df должен быть pandas.DataFrame")
         if column not in df.columns or time_column not in df.columns or groupby not in df.columns:
-            raise ValueError("нет нужных столбцов")
+            raise ValueError(f"Нет нужных столбцов: {column}, {time_column}, {groupby}")
 
-        df_copy = df.copy()
+        df_copy = df.reset_index(drop=True) if time_column in df.columns and df.index.name == time_column else df.copy()
+        if time_column not in df_copy.columns and df.index.name == time_column:
+            df_copy[time_column] = df.index
+
+        # Преобразуем time_dt в datetime перед обработкой
+        df_copy[time_column] = pd.to_datetime(df_copy[time_column])
+
         all_data = []
         for group in df_copy[groupby].unique():
             group_data = df_copy[df_copy[groupby] == group]
@@ -91,15 +91,16 @@ class MissingValueHandler:
             min_time = group_data[time_column].min()
             max_time = group_data[time_column].max()
             if pd.isna(min_time) or pd.isna(max_time):
-                logging.warning(f"Некорректные временные метки для uuid={group}. Пропуск группы.")
+                logging.warning(f"Некорректные временные метки для uuid={group}")
                 continue
             full_time_index = pd.date_range(start=min_time, end=max_time, freq='h')
             full_df = pd.DataFrame({time_column: full_time_index, groupby: group})
+            group_data = group_data.reset_index(drop=True)
             merged_df = full_df.merge(group_data, on=[groupby, time_column], how='left')
             all_data.append(merged_df)
 
         if not all_data:
-            raise ValueError("Нет данных для обработки после проверки временных меток")
+            raise ValueError("Нет данных для обработки")
 
         df_copy = pd.concat(all_data, ignore_index=True)
         missing_count = df_copy[column].isna().sum()

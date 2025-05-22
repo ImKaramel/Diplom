@@ -5,13 +5,11 @@ import pandas as pd
 import os
 
 class NormFix:
-    def __init__(self, method='minmax', params_file='norm_params.json'):
+    def __init__(self, method='minmax', params_file='data/processed/norm_params.json'):
         """
-        - method: метод нормализации
-            - minmax: (y - y_min) / (y_max - y_min), для неотрицательных данных
-            - log: log(y + 1), для неотрицательных данных
+            - minmax: (y - y_min) / (y_max - y_min)
+            - log: log(y + 1)
             - user_minmax: MinMax-нормализация по группам
-        - params_file: путь к файлу для сохранения параметров нормализации
         """
         self.method = method
         self.params_file = params_file
@@ -26,7 +24,6 @@ class NormFix:
             logging.warning(f"Пропуски в {col}: {df[col].isna().sum()}")
 
     def _handle_missing(self, series):
-        """Временная замена пропусков медианой для нормализации."""
         if series.isna().any():
             median = series.median()
             if pd.isna(median):
@@ -42,7 +39,7 @@ class NormFix:
                 json.dump(self.params, f, indent=4)
             logging.info(f"Параметры нормализации сохранены в {self.params_file}")
         except Exception as e:
-            logging.error(f"Ошибка  {str(e)}")
+            logging.error(f"Ошибка {str(e)}")
             raise
 
     def fix(self, df, col, group='uuid'):
@@ -60,7 +57,7 @@ class NormFix:
         if self.method == 'log':
             if (df_out[col] < 0).any():
                 logging.error("Обнаружены отрицательные значения в A+. Ошибка для log (не должно быть так)")
-                raise ValueError("Отрицательные значения не допускаются для log-нормализации")
+                raise ValueError("Отрицательные значения не допускаются для log ")
             df_out[col] = np.log(df_out[col] + 1)
             self.params = {'method': 'log'}
         elif self.method == 'user_minmax':
@@ -118,6 +115,11 @@ class NormFix:
 
         logging.info(f"Денормализация: метод={params['method']}")
 
+        if params['method'] in ['minmax', 'user_minmax']:
+            logging.info(f"До ограничения: min={df_out[col].min():.4f}, max={df_out[col].max():.4f}")
+            df_out[col] = df_out[col].clip(lower=0, upper=1)  # [0, 1]
+            logging.info(f"После ограничения: min={df_out[col].min():.4f}, max={df_out[col].max():.4f}")
+
         if params['method'] == 'log':
             df_out[col] = np.exp(df_out[col]) - 1
         elif params['method'] == 'user_minmax':
@@ -139,12 +141,10 @@ class NormFix:
             else:
                 df_out[col] = df_out[col] * (x_max - x_min) + x_min
 
-        logging.info(f"После денормализации: min={df_out[col].min():.4f}, max={df_out[col].max():.4f}, mean={df_out[col].mean():.2f}")
+        logging.info(f"После денормализации: min={df_out[col].min():.2f}, max={df_out[col].max():.4f}, mean={df_out[col].mean():.2f}")
 
         if (df_out[col] < 0).any():
-            logging.warning("Обнаружены отрицательные значения после денормализации(не должно быть так) Применяю clip(0)")
+            logging.warning("Обнаружены отрицательные значения после денормализации (не должно быть так в теории). Применяю clip(0)")
             df_out[col] = df_out[col].clip(lower=0)
 
         return df_out
-
-
