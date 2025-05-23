@@ -1,28 +1,51 @@
 data:
-  raw: data/raw/file2.csv
-  processed: data/processed/clean_data.csv
+  raw: ../data/raw/file2.csv
+  processed: ../data/processed/clean_data_knn_rf_minmax.csv
   norm_params: data/processed/norm_params.json
   forecasts: data/forecasts/forecasts.csv
+  column_mapping:
+    time_dt: time_dt
+    group: uuid
+    target: A_plus
+
 preprocessing:
   target_column: A_plus
   period: 24
   miss_method: knn
-  anom_method: rf
-  anom_act: interpolate
+  anom_method: stl
+  anom_act: mixed
   norm_method: minmax
-  k: 5
-  thresh: 2.5
-  rf_n_estimators: 100
+  k: 4
+  thresh: 4.0
+  rf_n_estimators: 150
   lookback: 168
   process_missing: true
   process_anomalies: true
-  process_normalization: false
+  process_normalization: true
+
 forecasting:
+  model: nbeats  # Можно выбрать arima nbeats xgboost
   horizon: 24
+  horizons: [72, 96, 120, 144, 168]  # Горизонты для кросс-валидации
   arima:
+    order: [1, 1, 1]
     auto: true
     s: 24
+  nbeats:
+    num_stacks: 2
+    num_blocks: 3
+    num_layers: 4
+    layer_widths: 512
+    n_epochs: 5
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    gamma: 0
+    lambda: 1
+
 graphics:
   output_dir: graphics
+
 logging:
   log_file: logs/project.log

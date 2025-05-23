@@ -9,63 +9,52 @@ from src.preprocessing.anomaly_fix import AnomalyFix
 from src.preprocessing.norm_fix import NormFix
 
 class DataPrep:
-    def __init__(
-            self,
-            miss_method='linear',
-            anom_method='stl',
-            anom_act='interpolate',
-            norm_method='minmax',
-            graph_dir='graphics',
-            process_missing=True,
-            process_anomalies=True,
-            process_normalization=True
-    ):
-        """
-        - miss_method: метод заполнения пропусков ('linear', 'seasonal', 'knn')
-        - anom_method: метод обнаружения аномалий ('stl', 'rf')
-        - anom_act: действие с аномалиями ('interpolate', 'remove')
-        - norm_method: метод нормализации ('minmax', 'log', 'user_minmax')
-        - graph_dir: директория для сохранения графиков
-        - process_missing: выполнять обработку пропусков (True/False)
-        - process_anomalies: выполнять обработку аномалий (True/False)
-        - process_normalization: выполнять нормализацию (True/False)
-        """
+    def __init__(self, config):
+        self.miss_method = config['preprocessing'].get('miss_method', 'linear')
+        self.anom_method = config['preprocessing'].get('anom_method', 'stl')
+        self.anom_act = config['preprocessing'].get('anom_act', 'interpolate')
+        self.norm_method = config['preprocessing'].get('norm_method', 'minmax')
+        self.graph_dir = config['graphics'].get('output_dir', 'graphics')
+        self.process_missing = config['preprocessing'].get('process_missing', True)
+        self.process_anomalies = config['preprocessing'].get('process_anomalies', True)
+        self.process_normalization = config['preprocessing'].get('process_normalization', True)
+
         valid_miss = ['linear', 'seasonal', 'knn']
         valid_anom = ['stl', 'rf']
-        valid_act = ['interpolate', 'remove']
+        valid_act = ['interpolate', 'remove', 'mixed']
         valid_norm = ['minmax', 'log', 'user_minmax']
-        if miss_method not in valid_miss:
-            raise ValueError(f"miss_method: {valid_miss}")
-        if anom_method not in valid_anom:
-            raise ValueError(f"anom_method: {valid_anom}")
-        if anom_act not in valid_act:
-            raise ValueError(f"anom_act: {valid_act}")
-        if norm_method not in valid_norm:
-            raise ValueError(f"norm_method: {valid_norm}")
 
-        self.miss_fix = MissingValueHandler(method=miss_method) if process_missing else None
-        self.anom_fix = AnomalyFix(method=anom_method, action=anom_act) if process_anomalies else None
-        self.norm_fix = NormFix(method=norm_method) if process_normalization else None
+        if self.miss_method not in valid_miss:
+            raise ValueError(f"Недопустимое значение miss_method: {self.miss_method}. Допустимые значения: {valid_miss}")
+        if self.anom_method not in valid_anom:
+            raise ValueError(f"Недопустимое значение anom_method: {self.anom_method}. Допустимые значения: {valid_anom}")
+        if self.anom_act not in valid_act:
+            raise ValueError(f"Недопустимое значение anom_act: {self.anom_act}. Допустимые значения: {valid_act}")
+        if self.norm_method not in valid_norm:
+            raise ValueError(f"Недопустимое значение norm_method: {self.norm_method}. Допустимые значения: {valid_norm}")
 
-        self.process_missing = process_missing
-        self.process_anomalies = process_anomalies
-        self.process_normalization = process_normalization
+        self.miss_fix = MissingValueHandler(method=self.miss_method) if self.process_missing else None
+        self.anom_fix = AnomalyFix(config) if self.process_anomalies else None
+        self.norm_fix = NormFix(method=self.norm_method, params_file=config['data']['norm_params']) if self.process_normalization else None
 
-        self.miss_method = miss_method
-        self.anom_method = anom_method
-        self.norm_method = norm_method
-        self.graph_dir = graph_dir
         os.makedirs(self.graph_dir, exist_ok=True)
         self.stats = []
         self.used_methods = []
 
     def _check(self, df, col, group, time_col='time_dt'):
-        if not isinstance(df, pd.DataFrame):
-            raise ValueError("df должен быть pandas.DataFrame")
-        req_cols = [col, group, time_col]
+        req_cols = [col, group]
         miss_cols = [c for c in req_cols if c not in df.columns]
         if miss_cols:
             raise ValueError(f"Нет столбцов: {miss_cols}")
+
+        if time_col not in df.columns:
+            if df.index.name == time_col and pd.api.types.is_datetime64_any_dtype(df.index):
+                df[time_col] = df.index
+            else:
+                raise ValueError(f"Столбец или индекс {time_col} не найден или не является временным")
+        elif time_col in df.columns and df.index.name == time_col:
+            df = df.reset_index(drop=True)
+
         if df[time_col].isna().any():
             raise ValueError(f"Пропуски в {time_col}")
         if np.isinf(df[col]).any():
@@ -95,7 +84,7 @@ class DataPrep:
         try:
             data = df[col].dropna()
             if len(data) < 10:
-                logging.warning(f"Недостаточно данных  на этапе {stage}")
+                logging.warning(f"Недостаточно данных на этапе {stage}")
                 return
             plt.figure(figsize=(10, 6))
             data.hist(bins=50, density=True)
@@ -112,7 +101,8 @@ class DataPrep:
         try:
             plt.figure(figsize=(15, 7))
             for df, lab in zip(dfs, labels):
-                grp_data = df[df[group] == uuid]
+                grp_data = df[df[group] == uuid].copy()
+                grp_data['time_dt'] = pd.to_datetime(grp_data['time_dt'])
                 if grp_data[col].notna().any():
                     plt.plot(grp_data['time_dt'], grp_data[col], label=lab, alpha=0.7)
             plt.xlabel('Время')
@@ -172,7 +162,7 @@ class DataPrep:
 
             if self.process_anomalies and self.anom_fix:
                 logging.info("Обработка аномалий")
-                df_out = self.anom_fix.fix(df_out, target, groupby=group)
+                df_out = self.anom_fix.fix(df_out, target, group=group)
                 self.used_methods.append(self.anom_method)
                 dfs.append(df_out.copy())
                 stages.append('после аномалий')

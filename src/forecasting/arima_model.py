@@ -1,114 +1,91 @@
 import logging
-
 import pandas as pd
-from matplotlib import pyplot as plt
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-from statsmodels.stats.diagnostic import acorr_ljungbox
-from statsmodels.tsa.arima_model import ARIMA
-from statsmodels.tsa.stattools import adfuller
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 class ARIMAModel:
-    def __init__(self, p=2, d=1, q=2, P=1, D=1, Q=1, s=24, auto=False):
-        """
-        Parameters:
-        - p, d, q: Порядки авторегрессии, дифференцирования и скользящего среднего.
-        - P, D, Q: Сезонные порядки.
-        - s: Сезонный период (по умолчанию 24 часа).
-        - auto: Если True, использовать auto_arima для подбора параметров
-        """
-        self.p, self.d, self.q = p, d, q
-        self.P, self.D, self.Q = P, D, Q
-        self.s = s
-        self.auto = auto
+    def __init__(self, config):
+        self.config = config
         self.model = None
-        self.fitted = None
-        self.last_date = None
-        self.offset = 0
+        self.series = None
+        self.series_index = None
+        self.order = config['forecasting'].get('arima', {}).get('order', (1, 1, 1))
+        self.horizon = config['forecasting'].get('horizon', 24)
 
-    def _check_stationarity(self, series):
-        # Проверка стационарности с помощью теста Дики-Фуллера
-        result = adfuller(series.dropna())
-        logging.info(f'ADF Statistic: {result[0]:.4f}, p-value: {result[1]:.4f}')
-        return result[1] < 0.05
+    def train(self, train_data):
+        try:
+            # if 'time_dt' not in train_data or 'target' not in train_data:
+            #     raise ValueError("Данные должны содержать столбцы 'time_dt' и 'target'")
 
-    def _plot_acf_pacf(self, series):
-        #графики ACF и PACF
-        diff = series.diff().dropna() if self.d > 0 else series
-        if self.D > 0:
-            diff = diff.diff(self.s).dropna()
+            train_data = train_data.set_index('time_dt')
+            self.series = train_data['target']
+            self.series_index = self.series.index
 
-        plt.figure(figsize=(12, 6))
-        plt.subplot(121)
-        plot_acf(diff, ax=plt.gca(), lags=min(len(diff)//2, self.s*2))
-        plt.title('ACF (дифференцированный ряд)')
-        plt.subplot(122)
-        plot_pacf(diff, ax=plt.gca(), lags=min(len(diff)//2, self.s*2))
-        plt.title('PACF (дифференцированный ряд)')
-        plt.savefig('acf_pacf.png')
-        plt.close()
+            if not pd.api.types.is_datetime64_any_dtype(self.series_index):
+                raise ValueError("Индекс временного ряда должен быть в формате datetime")
 
-    def _fit_model(self, series):
-        # Обучение модели
-        self.offset = -series.min() if series.min() < 0 else 0
-        transformed_series = series + self.offset
-        if self.auto:
-            self.model = auto_arima(transformed_series, seasonal=True, m=self.s,
-                                    max_p=3, max_d=2, max_q=3,
-                                    max_P=2, max_D=1, max_Q=2,
-                                    trace=True, error_action='ignore',
-                                    suppress_warnings=True)
-            self.p, self.d, self.q = self.model.order
-            self.P, self.D, self.Q, self.s = self.model.seasonal_order
-        else:
-            self.model = ARIMA(transformed_series, order=(self.p, self.d, self.q),
-                               seasonal_order=(self.P, self.D, self.Q, self.s))
-        self.fitted = self.model.fit()
-        logging.info(f'Параметры модели: ARIMA({self.p},{self.d},{self.q})x({self.P},{self.D},{self.Q},{self.s})')
 
-    def train(self, data, target='A_plus', group='uuid'):
-        if isinstance(data, pd.Series):
-            series = data.dropna()
-        else:
-            series = data[target].dropna()
+            self.series = self.series.asfreq('h', method='ffill')
+            self.series_index = self.series.index
+            logging.info(f"Частота временного ряда установлена: почасовая ('h')")
 
-        if len(series) < self.s * 2:
-            logging.warning(f'Недостаточно данных {len(series)} наблюдений')
-            return
+            if len(self.series) < 2:
+                raise ValueError("Недостаточно данных для обучения модели ARIMA")
 
-        if isinstance(series.index, pd.DatetimeIndex):
-            series.index.freq = 'h'
+            logging.info(f"Обучающие данные: {len(self.series)} точек, с {self.series_index[0]} по {self.series_index[-1]}")
 
-        if not self._check_stationarity(series):
-            logging.warning('Ряд нестационарен, результаты могут быть ненадежными')
+            # Обучение модели
+            self.model = ARIMA(self.series, order=self.order)
+            self.model_fit = self.model.fit()
+            logging.info(f"Модель ARIMA обучена с order={self.order}")
 
-        self._plot_acf_pacf(series)
-        self._fit_model(series)
-        self.last_date = series.index[-1] if isinstance(series.index, pd.DatetimeIndex) else None
-        self.check_residuals()
+        except Exception as e:
+            logging.error(f"Ошибка при обучении модели ARIMA: {str(e)}")
+            raise ValueError(f"Не удалось обучить модель ARIMA: {str(e)}")
 
-    def forecast(self, steps):
-        #Прогнозирование
-        if self.fitted is None:
-            raise ValueError('Модель не обучена')
-        forecast = self.fitted.forecast(steps=steps)
-        return forecast - self.offset
+    def forecast(self, horizon):
+        try:
+            if self.model_fit is None:
+                raise ValueError("Модель не обучена.")
 
-    def check_residuals(self):
-        if self.fitted is None:
-            return
-        residuals = self.fitted.resid
-        lb_test = acorr_ljungbox(residuals, lags=[1, 12, self.s], return_df=True)
-        logging.info(f"Тест Льюнга-Бокса: {lb_test}")
-        if lb_test['lb_pvalue'].min() < 0.05:
-            logging.warning("Обнаружена автокорреляция в остатках, модель может быть неадекватной")
-        plt.figure(figsize=(12, 6))
-        plt.subplot(211)
-        residuals.plot(title='Остатки')
-        plt.subplot(212)
-        plot_acf(residuals, lags=self.s, ax=plt.gca())
-        plt.title('ACF остатков')
-        plt.savefig('residuals.png')
-        plt.close()
+            if self.series_index is None or len(self.series_index) == 0:
+                raise ValueError("Индекс временного ряда не инициализирован")
 
+            logging.info(f"Создание прогноза ARIMA на горизонт {horizon}")
+            # Прогноз
+            forecast_result = self.model_fit.forecast(steps=horizon)
+            forecast = np.array(forecast_result)
+
+            # Доверительные интервалы
+            conf_int = self.model_fit.get_forecast(steps=horizon).conf_int(alpha=0.05)
+            conf_int_df = pd.DataFrame({
+                'lower': conf_int['lower ' + self.series.name],
+                'upper': conf_int['upper ' + self.series.name]
+            })
+
+            if len(forecast) != horizon:
+                logging.warning(f"Длина прогноза ({len(forecast)}) не соответствует горизонту ({horizon}), корректирую")
+                if len(forecast) > horizon:
+                    forecast = forecast[:horizon]
+                    conf_int_df = conf_int_df.iloc[:horizon]
+                else:
+                    forecast = np.pad(forecast, (0, horizon - len(forecast)), mode='constant', constant_values=np.nan)
+                    conf_int_df = conf_int_df.reindex(range(horizon), fill_value=np.nan)
+
+            logging.info(f"Прогноз ARIMA успешно создан, длина={len(forecast)}")
+            return forecast, conf_int_df
+
+        except Exception as e:
+            logging.error(f"Ошибка прогнозирования ARIMA: {str(e)}")
+            raise ValueError(f"Не удалось выполнить прогноз ARIMA: {str(e)}")
+
+    def evaluate(self, actual, forecast):
+        try:
+            mae = mean_absolute_error(actual, forecast)
+            rmse = np.sqrt(mean_squared_error(actual, forecast))
+            logging.info(f"Оценка прогноза: MAE={mae:.4f}, RMSE={rmse:.4f}")
+            return mae, rmse
+        except Exception as e:
+            logging.error(f"Ошибка оценки прогноза ARIMA: {str(e)}")
+            raise ValueError(f"Не удалось оценить прогноз: {str(e)}")

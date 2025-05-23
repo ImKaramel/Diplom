@@ -1,179 +1,298 @@
 import logging
 import os
-
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from src.forecasting.arima_model import ARIMAModel
-from src.preprocessing import NormFix
+from src.forecasting.nbeats_model import NBEATSInitializer
+from src.forecasting.xgboost_model import XGBoostModel
+from src.preprocessing import TimeSeriesAnalyzer
+from src.preprocessing.norm_fix import NormFix
 
-
-def time_series_cross_validation(series, n_splits=2, horizon=24):
-    n_train = len(series)
-    if n_train < horizon * 2:
+def cross_validation(df, group_col, target_col, folds=5, horizon=24):
+    series = df[target_col]
+    total_points = len(series)
+    if total_points < horizon * 2:
+        logging.warning(f"Мало данных для проверки: только {total_points} точек")
         return []
 
-    min_train_length = max(48, horizon * 2)
-    step_size = (n_train - horizon) // n_splits
+    min_train = max(48, horizon * 2)
+    fold_size = (total_points - horizon) // min_train
+    folds = min(folds, fold_size)
+    if folds <= 0:
+        logging.warning(f"Невозможно создать фолды: данных недостаточно")
+        return []
 
-    if step_size < min_train_length:
-        step_size = min_train_length
-
+    fold_size = (total_points - horizon) // folds
     splits = []
-    for i in range(n_splits):
-        train_start = i * step_size
-        train_end = train_start + step_size
-        val_end = train_end + horizon
+    for k in range(1, folds + 1):
+        train_end = fold_size * k
+        val_start = train_end
+        val_end = min(val_start + horizon, total_points)
 
-        if val_end > n_train:
-            val_end = n_train
-            train_end = max(0, val_end - horizon - step_size)
-            train_start = max(0, train_end - step_size)
+        if train_end < min_train:
+            logging.warning(f"Фолд {k}: Мало данных для обучения ({train_end} точек)")
+            continue
 
-        train_data = series[train_start:train_end]
-        val_data = series[train_end:val_end]
+        train_df = df.iloc[:train_end].copy()
+        val_df = df.iloc[val_start:val_end].copy()
 
-        if len(train_data) >= min_train_length and len(val_data) >= horizon:
-            splits.append((train_data, val_data))
+        if len(train_df) >= min_train and len(val_df) > 0:
+            splits.append((train_df, val_df))
+            logging.info(f"Фолд {k}: {len(train_df)} точек для обучения, {len(val_df)} для проверки")
+        else:
+            logging.warning(f"Фолд {k}: Пропущен из-за нехватки данных (обучение={len(train_df)}, проверка={len(val_df)})")
 
     return splits
 
-def evaluate_forecast(actual, forecast):
-    mae = mean_absolute_error(actual, forecast)
-    rmse = np.sqrt(mean_squared_error(actual, forecast))
+def evaluate_forecast(actual, predicted):
+    mae = mean_absolute_error(actual, predicted)
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
     return mae, rmse
 
-def forecast_arima():
-    try:
-        file = 'clean_data.csv'
-        logging.info(f"Читаю {file}")
-        if not os.path.exists(file):
-            raise FileNotFoundError(f"Файл не найден: {file}")
-        data = pd.read_csv(file, sep='\t')
-    except Exception as e:
-        logging.error(f"Ошибка загрузки: {str(e)}")
-        raise
+def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model, model_name, norm, plot_dir='graphics'):
+    logging.info(f"Подготовка данных для группы {group}, модель {model_name}")
+    group_df = df[df['group'] == group].copy().sort_values(time_col)
 
-    need_cols = ['time_dt', 'A_plus', 'uuid']
-    miss_cols = [c for c in need_cols if c not in data.columns]
-    if miss_cols:
-        raise KeyError(f"Нет столбцов: {miss_cols}. Есть: {data.columns.tolist()}")
+    if group_df[time_col].duplicated().any():
+        logging.warning(f"Найдены повторяющиеся даты для группы {group}, использую среднее")
+        group_df = group_df.groupby(time_col).agg({target: 'mean'}).reset_index()
+        group_df['group'] = group
 
-    data['time_dt'] = pd.to_datetime(data['time_dt'], errors='raise')
-    data = data.set_index('time_dt')
+    if len(group_df) < lookback + horizon:
+        logging.warning(f"Мало данных для группы {group}, пропускаю")
+        return None, None, None
 
-    norm_fix = NormFix()
-    try:
-        norm_params_file = 'norm_params.json'
-        if not os.path.exists(norm_params_file):
-            logging.warning(f"Файл параметров нормализации {norm_params_file} не найден, денормализация невозможна")
-            norm_params_file = None
-    except Exception as e:
-        logging.error(f"Ошибка загрузки параметров нормализации: {str(e)}")
-        norm_params_file = None
+    train_size = len(group_df) - horizon
+    if train_size < lookback:
+        logging.warning(f"Недостаточно данных для обучения группы {group}")
+        return None, None, None
 
-    horizons = [24]
-    forecasts = []
-    results = {}
+    logging.info(f"Разделение данных: {train_size} для обучения, {horizon} для теста")
+    train_df = group_df[[time_col, target, 'group']].iloc[:train_size].copy()
+    test_df = group_df[[time_col, target, 'group']].iloc[train_size:]
+
+    logging.info(f"Обучаю {model_name.upper()} для группы {group}")
+    model.train(train_df)
+    logging.info(f"Создание прогноза для группы {group}")
+    forecast, conf_int = model.forecast(horizon)
+    forecast_vals = forecast
+    test_vals = test_df[target].values
+    lower_ci = conf_int['lower'].to_numpy() if conf_int is not None else np.full(horizon, np.nan)
+    upper_ci = conf_int['upper'].to_numpy() if conf_int is not None else np.full(horizon, np.nan)
+
+    # Проверка длины прогноза
+    if len(forecast_vals) < horizon:
+        logging.warning(f"Прогноз для группы {group} короче ожидаемого ({len(forecast_vals)} вместо {horizon}), дополняю нули")
+        forecast_vals = np.pad(forecast_vals, (0, horizon - len(forecast_vals)), mode='constant', constant_values=0)
+    elif len(forecast_vals) > horizon:
+        logging.warning(f"Прогноз для группы {group} длиннее ожидаемого ({len(forecast_vals)} вместо {horizon}), укорачиваю")
+        forecast_vals = forecast_vals[:horizon]
+
+    forecast_time = pd.date_range(
+        start=group_df[time_col].iloc[-1] + pd.Timedelta(hours=1),
+        periods=horizon, freq='h'
+    )
+    logging.info(f"Создание DataFrame прогноза для группы {group}")
+    forecast_df = pd.DataFrame({
+        time_col: forecast_time,
+        'group': [group] * horizon,
+        'forecast': forecast_vals.flatten()
+    })
+    if model_name != 'nbeats' and lower_ci is not None and upper_ci is not None:
+        forecast_df['lower_ci'] = lower_ci.flatten()
+        forecast_df['upper_ci'] = upper_ci.flatten()
+
+    logging.info(f"Денормализация прогноза для группы {group}")
+    forecast_denorm = norm.denormalize(forecast_df, col='forecast', group='group')
+    if model_name != 'nbeats' and 'lower_ci' in forecast_denorm.columns:
+        forecast_denorm = norm.denormalize(forecast_denorm, col='lower_ci', group='group')
+        forecast_denorm = norm.denormalize(forecast_denorm, col='upper_ci', group='group')
+
+    test_df = pd.DataFrame({
+        time_col: forecast_time[:len(test_vals)],
+        'target': test_vals,
+        'group': [group] * len(test_vals)
+    })
+    logging.info(f"Денормализация тестовых данных для группы {group}")
+    test_denorm = norm.denormalize(test_df, col='target', group='group')
+    test_vals_denorm = test_denorm['target'].values
+
+    min_len = min(len(test_vals_denorm), len(forecast_denorm['forecast'].values))
+    mae, rmse = None, None
+    if min_len > 0:
+        mae = mean_absolute_error(test_vals_denorm[:min_len], forecast_denorm['forecast'].values[:min_len])
+        rmse = np.sqrt(mean_squared_error(test_vals_denorm[:min_len], forecast_denorm['forecast'].values[:min_len]))
+        logging.info(f"Группа {group}: MAE = {mae:.4f}, RMSE = {rmse:.4f}")
+    else:
+        logging.warning(f"Данные для группы {group} не совпадают по длине")
+
+    logging.info(f"Создание графика для группы {group}")
+    plt.figure(figsize=(12, 6))
+    plt.plot(test_denorm[time_col], test_denorm['target'], label='Реальные значения', color='blue')
+    plt.plot(forecast_denorm[time_col], forecast_denorm['forecast'], label='Прогноз', color='orange')
+    if model_name != 'nbeats' and 'lower_ci' in forecast_denorm.columns:
+        plt.fill_between(
+            forecast_denorm[time_col],
+            forecast_denorm['lower_ci'],
+            forecast_denorm['upper_ci'],
+            color='orange', alpha=0.2, label='95% доверительный интервал'
+        )
+    plt.title(f"Прогноз для группы {group} ({model_name.upper()})")
+    plt.xlabel('Время')
+    plt.ylabel('Потребление энергии (A_plus)')
+    plt.legend()
+    plt.grid(True)
+    os.makedirs(plot_dir, exist_ok=True)
+    plot_path = os.path.join(plot_dir, f"forecast_{model_name}_{group}.png")
+    plt.savefig(plot_path)
+    plt.close()
+    logging.info(f"График сохранен: {plot_path}")
+
+    return forecast_denorm, mae, rmse
+
+def forecast(config, data, file_path, model_name, model_init):
+    logging.info(f"Запуск прогнозирования с моделью {model_name.upper()}")
+
+    if data is None:
+        if file_path is None:
+            raise ValueError("Укажите данные или путь к файлу")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Файл {file_path} не найден")
+        df = pd.read_csv(file_path, sep='\t')
+    else:
+        df = data.copy()
+
+    columns = config.get('data', {}).get('column_mapping', {'group': 'uuid', 'target': 'A_plus'})
+    df = df.rename(columns={v: k for k, v in columns.items()})
+    df['time_dt'] = pd.to_datetime(df['time_dt'])
+
+    analyzer = TimeSeriesAnalyzer(target_column='target')
+    norm_method = config.get('preprocessing', {}).get('norm_method', 'minmax')
+    norm_file = config.get('data', {}).get('norm_params', 'data/processed/norm_params.json')
+    norm = NormFix(method=norm_method, params_file=norm_file)
+
+    horizon = config['forecasting'].get('horizon', 24)
+    lookback = config['preprocessing'].get('period', 24) * 7
+    horizons = config.get('forecasting', {}).get('horizons', [72, 96, 120, 144, 168])
+    max_horizon = max(horizons)
+
+    results = []
+    forecasts_df = pd.DataFrame()
     skipped_groups = []
 
-    for uuid in data['uuid'].unique():
-        group_data = data[data['uuid'] == uuid]['A_plus']
-        if len(group_data) < 48:
-            logging.warning(f"Мало данных для uuid={uuid}: {len(group_data)} наблюдений, пропускаю")
-            skipped_groups.append(uuid)
+    for group in df['group'].unique():
+        logging.info(f"Обработка группы {group}")
+        group_df = df[df['group'] == group][['time_dt', 'target']].copy().set_index('time_dt')
+        group_df.index = pd.to_datetime(group_df.index)
+
+        if len(group_df) < 48:
+            logging.warning(f"Мало данных для группы {group}: {len(group_df)} точек, пропускаю")
+            skipped_groups.append(group)
             continue
 
-        if not np.isfinite(group_data).all():
-            logging.warning(f"Данные для uuid={uuid} содержат NaN или inf, пропускаю")
-            skipped_groups.append(uuid)
+        if not np.isfinite(group_df['target']).all():
+            logging.warning(f"Некорректные данные в группе {group}, пропускаю")
+            skipped_groups.append(group)
             continue
 
-        group_data = group_data.resample('h').mean().interpolate(method='linear')
-        group_data.index.freq = 'h'
+        target_series = group_df['target'].resample('h').mean().interpolate(method='linear')
+        group_df = pd.DataFrame({'target': target_series, 'group': group}).reset_index().rename(columns={'index': 'time_dt'})
+        logging.info(f"Группа {group}: Значения от {group_df['target'].min():.2f} до {group_df['target'].max():.2f}")
 
-        logging.info(f"uuid={uuid}: Диапазон A_plus: min={group_data.min():.2f}, max={group_data.max():.2f}")
+        train_df = group_df.iloc[:int(len(group_df) * 0.8)].copy()
+        test_df = group_df.iloc[int(len(group_df) * 0.8):].copy()
+        logging.info(f"Группа {group}: Всего {len(group_df)} точек, обучение: {len(train_df)}, тест: {len(test_df)}")
 
-        n_train = int(len(group_data) * 0.8)
-        train_data = group_data[:n_train]
-        test_data = group_data[n_train:]
-        logging.info(f"uuid={uuid}: Общая длина: {len(group_data)}, тренировочная: {len(train_data)}, тестовая: {len(test_data)}")
-
-        if len(train_data) < 72:
-            logging.warning(f"Недостаточно данных для кросс-валидации uuid={uuid}, использую все данные")
-            cv_maes = []
-        else:
-            logging.info(f"Кросс-валидация для uuid={uuid}")
-            cv_splits = time_series_cross_validation(train_data, n_splits=2, horizon=max(horizons))
-            cv_maes = []
-
-            for train_split, val_split in cv_splits:
-                logging.info(f"Фолд: train={len(train_split)}, val={len(val_split)}")
-                if len(train_split) < 24 or len(val_split) < max(horizons):
-                    logging.warning(f"Недостаточно данных для фолда, пропускаю")
-                    continue
-                try:
-                    arima = ARIMAModel(auto=True, s=24)
-                    arima.train(train_split)
-                    forecast = arima.forecast(steps=len(val_split))
-                    if len(forecast) < len(val_split):
-                        raise ValueError("Недостаточная длина прогноза")
-                    mae, _ = evaluate_forecast(val_split, forecast)
-                    cv_maes.append(mae)
-                except Exception as e:
-                    logging.error(f"Ошибка кросс-валидации для uuid={uuid}: {str(e)}")
-                    continue
-
-            if cv_maes:
-                logging.info(f"Среднее MAE на кросс-валидации для uuid={uuid}: {np.mean(cv_maes):.2f}")
-            else:
-                logging.warning(f"Кросс-валидация для uuid={uuid} не выполнена")
-
-        logging.info(f"Обучаю модель для uuid={uuid}")
-        arima = ARIMAModel(auto=True, s=24)
-        try:
-            arima.train(train_data)
-        except Exception as e:
-            logging.error(f"Ошибка обучения для uuid={uuid}: {str(e)}")
-            skipped_groups.append(uuid)
+        splits = cross_validation(train_df, group_col='group', target_col='target', folds=5, horizon=max_horizon)
+        if not splits:
+            logging.warning(f"Проверка для группы {group} не удалась из-за нехватки данных")
             continue
 
+        group_results = {}
         for horizon in horizons:
-            forecast = arima.forecast(steps=horizon)
-            # Денормализация прогноза
-            forecast_df = pd.DataFrame({
-                'uuid': [uuid] * len(forecast),
-                'time_dt': pd.date_range(start=train_data.index[-1] + pd.Timedelta(hours=1), periods=horizon, freq='h'),
-                'forecast': forecast
-            })
-            if norm_params_file:
-                try:
-                    forecast_df = norm_fix.denormalize(forecast_df, col='forecast', group='uuid', params_file=norm_params_file)
-                except Exception as e:
-                    logging.error(f"Ошибка денормализации для uuid={uuid}: {str(e)}")
+            mae, rmse = 0, 0
+            fold_count = len(splits)
+            for train_fold, val_fold in splits:
+                if 'time_dt' not in train_fold.columns and pd.api.types.is_datetime64_any_dtype(train_fold.index):
+                    train_fold = train_fold.reset_index()
+                if 'time_dt' not in val_fold.columns and pd.api.types.is_datetime64_any_dtype(val_fold.index):
+                    val_fold = val_fold.reset_index()
 
-            actual = test_data[:horizon]
-            mae, rmse = evaluate_forecast(actual, forecast)
-            logging.info(f"uuid={uuid}, горизонт={horizon}: MAE={mae:.2f}, RMSE={rmse:.2f}")
-            forecasts.append(forecast_df)
-            results[(uuid, horizon)] = (mae, rmse)
+                model = model_init(config)
+                if model_name == 'arima':
+                    stat_series, d = analyzer.make_stationary(
+                        train_df.set_index('time_dt')['target'], max_diff=2, name=f"Группа {group}"
+                    )
+                    model.order = (1, d, 1)
+
+                logging.info(f"Обучение модели для группы {group}, горизонт {horizon}, фолд")
+                model.train(train_fold)
+                logging.info(f"Прогноз для группы {group}, горизонт {horizon}, фолд")
+                forecast, conf_int = model.forecast(horizon)
+                actual = val_fold['target'].values[:horizon]
+                time = val_fold['time_dt'].values[:horizon]
+
+                min_len = min(len(time), len(forecast), len(actual), horizon)
+                if min_len < horizon:
+                    logging.warning(f"Укорачиваю данные для группы {group} до {min_len} точек")
+                    time = time[:min_len]
+                    forecast = forecast[:min_len]
+                    actual = actual[:min_len]
+
+                forecast_df = pd.DataFrame({'time_dt': time, 'target': forecast, 'group': [group] * min_len})
+                forecast_denorm = norm.denormalize(forecast_df, col='target', group='group')['target'].values
+                actual_df = pd.DataFrame({'time_dt': time, 'target': actual, 'group': [group] * min_len})
+                actual_denorm = norm.denormalize(actual_df, col='target', group='group')['target'].values
+
+                fold_mae, fold_rmse = evaluate_forecast(actual_denorm, forecast_denorm)
+                mae += fold_mae
+                rmse += fold_rmse
+
+            mae /= fold_count
+            rmse /= fold_count
+            group_results[horizon] = {'MAE': mae, 'RMSE': rmse}
+            logging.info(f"Группа {group}, горизонт {horizon}: MAE={mae:.2f}, RMSE={rmse:.2f}")
+
+        results.append({'group': group, 'results': group_results})
+
+        model = model_init(config)
+        if model_name == 'arima':
+            stat_series, d = analyzer.make_stationary(
+                train_df.set_index('time_dt')['target'], max_diff=2, name=f"Группа {group}"
+            )
+            model.order = (1, d, 1)
+
+        logging.info(f"Финальный прогноз для группы {group}")
+        forecast_df, mae, rmse = _prepare_and_forecast(
+            df, group, 'time_dt', 'target', lookback, max_horizon, model, model_name, norm, plot_dir=analyzer.graphics_dir
+        )
+        if forecast_df is not None:
+            forecasts_df = pd.concat([forecasts_df, forecast_df], ignore_index=True)
+            logging.info(f"Прогноз для группы {group} добавлен в результаты")
 
     if skipped_groups:
-        logging.info(f"Пропущено групп: {len(skipped_groups)}, uuid: {skipped_groups}")
+        logging.warning(f"Пропущены группы: {', '.join(skipped_groups)}")
 
-    try:
-        if forecasts:
-            forecasts_df = pd.concat(forecasts, ignore_index=True)
-            forecasts_df.to_csv('forecasts.csv', index=False, sep='\t')
-            logging.info("Прогнозы сохранены в forecasts.csv")
-        else:
-            logging.warning("Нет прогнозов для сохранения")
-    except Exception as e:
-        logging.error(f"Ошибка сохранения прогнозов {str(e)}")
-        raise
+    if not forecasts_df.empty:
+        forecast_dir = os.path.dirname(config['data']['forecasts'])
+        os.makedirs(forecast_dir, exist_ok=True)
+        output_path = config['data']['forecasts'].replace('.csv', f'_{model_name}.csv') if model_name == 'xgboost' else config['data']['forecasts']
+        forecasts_df.to_csv(output_path, index=False, sep='\t')
+        logging.info(f"Прогнозы сохранены в {output_path}")
+    else:
+        logging.warning("Прогнозы не созданы")
 
-    return results, forecasts_df if forecasts else None
+    logging.info("Прогнозирование завершено")
+    return results, forecasts_df
 
-# if __name__ == "__main__":
-#     results, forecasts_df = forecast_arima()
+def forecast_arima(config, data=None, file_path=None):
+    return forecast(config, data, file_path, 'arima', lambda cfg: ARIMAModel(cfg))
+
+def forecast_nbeats(config, data=None, file_path=None):
+    return forecast(config, data, file_path, 'nbeats', lambda cfg: NBEATSInitializer(cfg).initialize_model())
+
+def forecast_xgboost(config, data=None, file_path=None):
+    return forecast(config, data, file_path, 'xgboost', lambda cfg: XGBoostModel(cfg))

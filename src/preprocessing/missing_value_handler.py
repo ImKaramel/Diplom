@@ -79,7 +79,6 @@ class MissingValueHandler:
         if time_column not in df_copy.columns and df.index.name == time_column:
             df_copy[time_column] = df.index
 
-        # Преобразуем time_dt в datetime перед обработкой
         df_copy[time_column] = pd.to_datetime(df_copy[time_column])
 
         all_data = []
