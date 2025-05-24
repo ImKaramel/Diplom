@@ -41,6 +41,17 @@ def main():
         raw_data = pd.read_csv(raw_data_path, sep='\t')
         logging.info(f"Загружены исходные данные {raw_data_path}")
 
+        start_date = raw_data['time_dt'].min()
+        end_date = raw_data['time_dt'].max()
+        num_users = raw_data['uuid'].nunique()
+        min_value = raw_data['A_plus'].min()
+        max_value = raw_data['A_plus'].max()
+        logging.info(f"Информация об исходном датасете (до предобработки):")
+        logging.info(f"Период охвата: с {start_date} по {end_date}")
+        logging.info(f"Количество пользователей - {num_users}")
+        logging.info(f"Минимальное значение A_plus - {min_value}")
+        logging.info(f"Максимальное значение A_plus - {max_value}")
+
         analyzer = TimeSeriesAnalyzer(target_column='A_plus', period=config['preprocessing'].get('period', 24),
                                       graphics_dir=config['graphics'].get('output_dir', 'graphics'), config=config)
         analyzer.analyze(raw_data, groupby='uuid')
@@ -75,7 +86,6 @@ def main():
         graphics_dir=config['graphics']['output_dir'],
         norm_fix=norm_fix
     )
-
     model_type = config['forecasting'].get('model', 'arima').lower()
     logging.info(f"Начало прогнозирования с помощью {model_type.upper()}")
 

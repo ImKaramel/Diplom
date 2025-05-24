@@ -117,7 +117,6 @@ class TimeSeriesAnalyzer:
                 except Exception as e:
                     group_logger.error(f"Ошибка STL для uuid_{group}: {str(e)}")
 
-
     def analyze(self, df, groupby='group'):
         logging.info("Начало анализа временных рядов")
         df = df.copy()
@@ -133,83 +132,6 @@ class TimeSeriesAnalyzer:
         self.plot_stl_decomposition(df, groupby)
 
         logging.info("Анализ временных рядов завершён")
-
-
-    def plot_forecast(self, df_original, df_forecast, groupby='group'):
-        if self.norm_fix is None and self.config and self.config.get('preprocessing', {}).get('process_normalization', False):
-            raise ValueError("Объект norm_fix не инициализирован")
-
-        for group in df_original[groupby].unique():
-            group_logger = self._setup_group_logger(group)
-            original_data = df_original[df_original[groupby] == group].copy()
-            forecast_data = df_forecast[df_forecast['group'] == group].copy()
-
-            if original_data.empty or forecast_data.empty:
-                group_logger.warning(f"Нет данных для визуализации прогнозов для uuid_{group}")
-                continue
-
-
-            if self.config and self.config.get('preprocessing', {}).get('process_normalization', False):
-                original_denorm = self.norm_fix.denormalize(
-                    original_data[['time_dt', self.target_column, 'group']],
-                    col=self.target_column,
-                    group='group'
-                )
-                original_denorm['time_dt'] = pd.to_datetime(original_denorm['time_dt'])
-
-                forecast_denorm = self.norm_fix.denormalize(
-                    forecast_data[['time_dt', 'A_plus_forecast', 'group']],
-                    col='A_plus_forecast',
-                    group='group'
-                )
-
-                if 'lower_ci' in forecast_data.columns and 'upper_ci' in forecast_data.columns:
-                    forecast_denorm = self.norm_fix.denormalize(
-                        forecast_denorm,
-                        col='lower_ci',
-                        group='group'
-                    )
-                    forecast_denorm = self.norm_fix.denormalize(
-                        forecast_denorm,
-                        col='upper_ci',
-                        group='group'
-                    )
-            else:
-                original_denorm = original_data.copy()
-                original_denorm['time_dt'] = pd.to_datetime(original_denorm['time_dt'])
-                forecast_denorm = forecast_data.copy()
-                forecast_denorm['time_dt'] = pd.to_datetime(forecast_denorm['time_dt'])
-                forecast_denorm = forecast_denorm.rename(columns={'A_plus_forecast': self.target_column})
-
-            plt.figure(figsize=(15, 7))
-            plt.plot(original_denorm['time_dt'], original_denorm[self.target_column],
-                     label='Actual', color='#1f77b4', linewidth=2)
-            plt.plot(forecast_denorm['time_dt'], forecast_denorm[self.target_column],
-                     label='Forecast', color='#ff7f0e', linestyle='--', linewidth=2)
-
-            if 'lower_ci' in forecast_denorm.columns and 'upper_ci' in forecast_denorm.columns:
-                plt.fill_between(forecast_denorm['time_dt'],
-                                 forecast_denorm['lower_ci'],
-                                 forecast_denorm['upper_ci'],
-                                 color='#ff9896', alpha=0.3, label='Confidence Interval')
-
-            plt.xlabel('Time', fontsize=12)
-            plt.ylabel(self.target_column, fontsize=12)
-            plt.title(f'Forecast vs Actual for uuid_{group}', fontsize=14, pad=10)
-            plt.legend(fontsize=10, loc='best')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-            plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
-            plt.gcf().autofmt_xdate()
-            plt.ylim(bottom=0)
-
-            output_path = os.path.join(self.graphics_dir, f'forecast_plot_{group}.png')
-            os.makedirs(self.graphics_dir, exist_ok=True)
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            group_logger.info(f"График прогнозов сохранён в {output_path}")
-
-
 
     def test_stationarity(self, series, name="Series"):
         series = series.dropna()
@@ -235,6 +157,18 @@ class TimeSeriesAnalyzer:
             logging.info(f"{name} стационарен (p-value < 0.05)")
         else:
             logging.info(f"{name} не стационарен (p-value >= 0.05), требуется дифференцирование")
+
+        output_path = os.path.join(self.graphics_dir, f"{name}_adf_test.txt")
+        os.makedirs(self.graphics_dir, exist_ok=True)
+        with open(output_path, 'w') as f:
+            f.write(f"ADF тест для {name}:\n")
+            f.write(f"ADF Statistic: {adf_statistic:.4f}\n")
+            f.write(f"p-value: {p_value:.4f}\n")
+            f.write("Критические значения:\n")
+            for key, value in critical_values.items():
+                f.write(f"\t{key}: {value:.4f}\n")
+            f.write(f"{name} {'стационарен' if is_stationary else 'не стационарен'} (p-value {'<' if p_value < 0.05 else '>='} 0.05)\n")
+        logging.info(f"Результаты ADF теста сохранены в {output_path}")
 
         return is_stationary
 

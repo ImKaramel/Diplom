@@ -122,6 +122,7 @@ class DataPrep:
             plt.figure(figsize=(10, 6))
             for df, lab in zip(dfs, labels):
                 data = df[col].dropna()
+                print(f"Этап {lab}: количество данных после dropna = {len(data)}")
                 if len(data) < 10:
                     logging.warning(f"Недостаточно данных для сравнения на этапе {lab}")
                     continue
@@ -133,6 +134,7 @@ class DataPrep:
             plt.grid(True)
             plt.savefig(os.path.join(self.graph_dir, 'dist_comparison.png'))
             plt.close()
+            logging.info(f"График сравнения распределений сохранен в {os.path.join(self.graph_dir, 'dist_comparison.png')}")
         except Exception as e:
             logging.error(f"Ошибка сравнения распределений: {str(e)}")
 

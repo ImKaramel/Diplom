@@ -11,9 +11,9 @@ class MissingValueHandler:
         if method not in ['linear', 'seasonal', 'knn']:
             raise ValueError("Метод должен быть 'linear', 'seasonal' или 'knn'")
 
-    def _linear_interpolation(self, series, indices):
+    def _linear_interpolation(self, series, local_indices):
         interpolated = series.copy()
-        for idx in indices:
+        for idx in local_indices:
             prev_idx = next((i for i in range(idx-1, -1, -1) if not np.isnan(series[i])), None)
             next_idx = next((i for i in range(idx+1, len(series)) if not np.isnan(series[i])), None)
             if prev_idx is not None and next_idx is not None:
@@ -70,11 +70,6 @@ class MissingValueHandler:
         return df_copy
 
     def handle(self, df, column, groupby='uuid', time_column='time_dt'):
-        if not isinstance(df, pd.DataFrame):
-            raise ValueError("df должен быть pandas.DataFrame")
-        if column not in df.columns or time_column not in df.columns or groupby not in df.columns:
-            raise ValueError(f"Нет нужных столбцов: {column}, {time_column}, {groupby}")
-
         df_copy = df.reset_index(drop=True) if time_column in df.columns and df.index.name == time_column else df.copy()
         if time_column not in df_copy.columns and df.index.name == time_column:
             df_copy[time_column] = df.index
@@ -85,7 +80,7 @@ class MissingValueHandler:
         for group in df_copy[groupby].unique():
             group_data = df_copy[df_copy[groupby] == group]
             if group_data[time_column].isna().any():
-                logging.warning(f"Обнаружены пропуски в {time_column} для uuid={group}")
+                logging.warning(f"Обнаружено пропуски в {time_column} для uuid={group}")
                 continue
             min_time = group_data[time_column].min()
             max_time = group_data[time_column].max()
@@ -115,11 +110,13 @@ class MissingValueHandler:
             else:  # linear
                 for group in df_copy[groupby].unique():
                     group_mask = df_copy[groupby] == group
-                    series = df_copy.loc[group_mask, column].values
-                    indices = df_copy.loc[group_mask & df_copy[column].isna()].index
-                    if len(indices) > 0:
-                        interpolated = self._linear_interpolation(series, indices)
-                        df_copy.loc[group_mask, column] = interpolated
+                    group_data = df_copy[group_mask].reset_index(drop=True)
+                    series = group_data[column].values
+                    local_indices = group_data[group_data[column].isna()].index.tolist()
+                    if len(local_indices) > 0:
+                        interpolated = self._linear_interpolation(series, local_indices)
+                        group_data[column] = interpolated
+                        df_copy.loc[group_mask, column] = group_data.set_index(df_copy.loc[group_mask].index)[column]
                 df_copy[column] = df_copy.groupby(groupby)[column].transform(
                     lambda x: x.fillna(x.mean() if x.notna().any() else 0))
 

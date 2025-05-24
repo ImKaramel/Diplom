@@ -1,5 +1,5 @@
 data:
-  raw: ../data/raw/file2.csv
+  raw: ../data/raw/file20.csv
   processed: ../data/processed/clean_data_knn_rf_minmax.csv
   norm_params: data/processed/norm_params.json
   forecasts: data/forecasts/forecasts.csv
@@ -11,10 +11,10 @@ data:
 preprocessing:
   target_column: A_plus
   period: 24
-  miss_method: knn
-  anom_method: stl
+  miss_method: seasonal # 'linear', 'seasonal', 'knn'
+  anom_method: stl  #  'rf' или 'stl'
   anom_act: mixed
-  norm_method: minmax
+  norm_method: minmax  # 'minmax', 'log', 'user_minmax'
   k: 4
   thresh: 4.0
   rf_n_estimators: 150
@@ -24,11 +24,11 @@ preprocessing:
   process_normalization: true
 
 forecasting:
-  model: nbeats  # Можно выбрать arima nbeats xgboost
+  model: xgboost  # Можно выбрать arima nbeats xgboost
   horizon: 168
   horizons: [72, 96, 120, 144, 168]  # Горизонты для кросс-валидации
   arima:
-    order: [1, 1, 1]
+    order: [2, 0, 2]
     auto: true
     s: 24
   nbeats:

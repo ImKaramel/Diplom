@@ -50,6 +50,7 @@ def cross_validation(df, group_col, target_col, folds=5, horizon=24):
 def evaluate_forecast(actual, predicted):
     mae = mean_absolute_error(actual, predicted)
     rmse = np.sqrt(mean_squared_error(actual, predicted))
+
     return mae, rmse
 
 def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model, model_name, norm, plot_dir='graphics'):
@@ -63,12 +64,12 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
 
     if len(group_df) < lookback + horizon:
         logging.warning(f"Мало данных для группы {group}, пропускаю")
-        return None, None, None
+        return None, None, None, None
 
     train_size = len(group_df) - horizon
     if train_size < lookback:
         logging.warning(f"Недостаточно данных для обучения группы {group}")
-        return None, None, None
+        return None, None, None, None
 
     logging.info(f"Разделение данных: {train_size} для обучения, {horizon} для теста")
     train_df = group_df[[time_col, target, 'group']].iloc[:train_size].copy()
@@ -121,10 +122,9 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
     test_vals_denorm = test_denorm['target'].values
 
     min_len = min(len(test_vals_denorm), len(forecast_denorm['forecast'].values))
-    mae, rmse = None, None
+    mae, rmse = None, None, None
     if min_len > 0:
-        mae = mean_absolute_error(test_vals_denorm[:min_len], forecast_denorm['forecast'].values[:min_len])
-        rmse = np.sqrt(mean_squared_error(test_vals_denorm[:min_len], forecast_denorm['forecast'].values[:min_len]))
+        mae, rmse = evaluate_forecast(test_vals_denorm[:min_len], forecast_denorm['forecast'].values[:min_len])
         logging.info(f"Группа {group}: MAE = {mae:.4f}, RMSE = {rmse:.4f}")
     else:
         logging.warning(f"Данные для группы {group} не совпадают по длине")
@@ -182,6 +182,7 @@ def forecast(config, data, file_path, model_name, model_init):
     results = []
     forecasts_df = pd.DataFrame()
     skipped_groups = []
+    metrics_list = []
 
     for group in df['group'].unique():
         logging.info(f"Обработка группы {group}")
@@ -213,7 +214,7 @@ def forecast(config, data, file_path, model_name, model_init):
 
         group_results = {}
         for horizon in horizons:
-            mae, rmse = 0, 0
+            mae, rmse, r2 = 0, 0, 0
             fold_count = len(splits)
             for train_fold, val_fold in splits:
                 if 'time_dt' not in train_fold.columns and pd.api.types.is_datetime64_any_dtype(train_fold.index):
@@ -250,11 +251,21 @@ def forecast(config, data, file_path, model_name, model_init):
                 fold_mae, fold_rmse = evaluate_forecast(actual_denorm, forecast_denorm)
                 mae += fold_mae
                 rmse += fold_rmse
+                # r2 += fold_r2
 
             mae /= fold_count
             rmse /= fold_count
+            # r2 /= fold_count
             group_results[horizon] = {'MAE': mae, 'RMSE': rmse}
             logging.info(f"Группа {group}, горизонт {horizon}: MAE={mae:.2f}, RMSE={rmse:.2f}")
+
+            metrics_list.append({
+                'Group': group,
+                'Horizon': horizon,
+                'MAE': mae,
+                'RMSE': rmse,
+                'Evaluation_Type': 'Cross-Validation'
+            })
 
         results.append({'group': group, 'results': group_results})
 
@@ -266,12 +277,20 @@ def forecast(config, data, file_path, model_name, model_init):
             model.order = (1, d, 1)
 
         logging.info(f"Финальный прогноз для группы {group}")
-        forecast_df, mae, rmse = _prepare_and_forecast(
+        forecast_df, mae, rmse, r2 = _prepare_and_forecast(
             df, group, 'time_dt', 'target', lookback, max_horizon, model, model_name, norm, plot_dir=analyzer.graphics_dir
         )
         if forecast_df is not None:
             forecasts_df = pd.concat([forecasts_df, forecast_df], ignore_index=True)
             logging.info(f"Прогноз для группы {group} добавлен в результаты")
+            if mae is not None and rmse is not None:
+                metrics_list.append({
+                    'Group': group,
+                    'Horizon': max_horizon,
+                    'MAE': mae,
+                    'RMSE': rmse,
+                    'Evaluation_Type': 'Final_Forecast'
+                })
 
     if skipped_groups:
         logging.warning(f"Пропущены группы: {', '.join(skipped_groups)}")
@@ -282,6 +301,12 @@ def forecast(config, data, file_path, model_name, model_init):
         output_path = config['data']['forecasts'].replace('.csv', f'_{model_name}.csv') if model_name == 'xgboost' else config['data']['forecasts']
         forecasts_df.to_csv(output_path, index=False, sep='\t')
         logging.info(f"Прогнозы сохранены в {output_path}")
+
+
+        metrics_df = pd.DataFrame(metrics_list)
+        metrics_path = os.path.join(forecast_dir, f'metrics_{model_name}.csv')
+        metrics_df.to_csv(metrics_path, index=False, sep='\t')
+        logging.info(f"Метрики сохранены в {metrics_path}")
     else:
         logging.warning("Прогнозы не созданы")
 
