@@ -7,12 +7,12 @@ from darts.models import NBEATSModel
 class NBEATSInitializer:
     def __init__(self, config):
         self.input_chunk_length = config['preprocessing'].get('period', 24) * 7  # Ретроспектива
-        self.output_chunk_length = config['forecasting'].get('horizon', 24)  # Горизонт прогноза
+        self.output_chunk_length = config['forecasting'].get('horizon', 168)  # Горизонт прогноза
         self.num_stacks = config['forecasting'].get('nbeats', {}).get('num_stacks', 2)  # Количество стеков
         self.num_blocks = config['forecasting'].get('nbeats', {}).get('num_blocks', 3)  # Количество блоков в стеке
         self.num_layers = config['forecasting'].get('nbeats', {}).get('num_layers', 4)  # Количество слоев в блоке
-        self.layer_widths = config['forecasting'].get('nbeats', {}).get('layer_widths', 512)  # Ширина слоев
-        self.n_epochs = config['forecasting'].get('nbeats', {}).get('n_epochs', 50)  # Количество эпох
+        self.layer_widths = config['forecasting'].get('nbeats', {}).get('layer_widths', 512) # Ширина слоев
+        self.n_epochs = config['forecasting'].get('nbeats', {}).get('n_epochs', 5)
 
     def initialize_model(self):
         try:
@@ -25,7 +25,7 @@ class NBEATSInitializer:
                 layer_widths=self.layer_widths,
                 n_epochs=self.n_epochs
             )
-            logging.info("Модель N-BEATS инициализирована с precision=32-true для MPS")
+            logging.info(f"Модель N-BEATS инициализирована с precision=32-true для MPS, horizon={self.output_chunk_length}")
             return model
         except Exception as e:
             logging.error(f"Ошибка инициализации модели N-BEATS: {str(e)}")
@@ -65,14 +65,33 @@ class NBEATSWrapper:
 
     def forecast(self, horizon):
         try:
-            if horizon != self.horizon:
-                logging.warning(f"Запрошенный горизонт {horizon} отличается от output_chunk_length {self.horizon}, использую {self.horizon}")
-                horizon = self.horizon
             logging.info(f"Создание прогноза N-BEATS на горизонт {horizon}")
-            forecast = self.model.predict(n=horizon)
-            forecast_vals = forecast.values().flatten()
+            if horizon > self.horizon:
+                logging.warning(f"Горизонт {horizon} превышает output_chunk_length {self.horizon}, используем рекурсивный прогноз")
+                forecast_vals = self._recursive_forecast(horizon)
+            else:
+                forecast = self.model.predict(n=horizon)
+                forecast_vals = forecast.values().flatten()
             logging.info(f"Прогноз N-BEATS успешно создан, длина={len(forecast_vals)}")
-            return forecast_vals, None  #  не возвращает доверительные интервалы
+            return forecast_vals, None  # Не возвращает доверительные интервалы
         except Exception as e:
             logging.error(f"Ошибка прогнозирования N-BEATS: {str(e)}")
             raise ValueError(f"Не удалось выполнить прогноз N-BEATS: {str(e)}")
+
+    def _recursive_forecast(self, horizon):
+        forecast_vals = []
+        current_series = None
+        steps_left = horizon
+
+        while steps_left > 0:
+            pred_horizon = min(self.horizon, steps_left)
+            if current_series is None:
+                forecast = self.model.predict(n=pred_horizon)
+            else:
+                forecast = self.model.predict(n=pred_horizon, past_values=current_series)
+            forecast_vals.extend(forecast.values().flatten())
+            steps_left -= pred_horizon
+            if steps_left > 0:
+                current_series = TimeSeries.from_values(forecast_vals[-self.horizon:])
+
+        return np.array(forecast_vals[:horizon])
