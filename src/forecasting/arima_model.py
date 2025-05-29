@@ -10,25 +10,17 @@ class ARIMAModel:
         self.model = None
         self.series = None
         self.series_index = None
-        self.order = config['forecasting'].get('arima', {}).get('order', (1, 1, 1))
+        self.order = config['forecasting'].get('arima', {}).get('order', (2, 0, 1))
         self.horizon = config['forecasting'].get('horizon', 24)
 
     def train(self, train_data):
         try:
-            # if 'time_dt' not in train_data or 'target' not in train_data:
-            #     raise ValueError("Данные должны содержать столбцы 'time_dt' и 'target'")
-
             train_data = train_data.set_index('time_dt')
             self.series = train_data['target']
             self.series_index = self.series.index
 
-            if not pd.api.types.is_datetime64_any_dtype(self.series_index):
-                raise ValueError("Индекс временного ряда должен быть в формате datetime")
-
-
             self.series = self.series.asfreq('h', method='ffill')
             self.series_index = self.series.index
-            logging.info(f"Частота временного ряда установлена: почасовая ('h')")
 
             if len(self.series) < 2:
                 raise ValueError("Недостаточно данных для обучения модели ARIMA")
@@ -41,7 +33,6 @@ class ARIMAModel:
             logging.info(f"Модель ARIMA обучена с order={self.order}")
 
         except Exception as e:
-            logging.error(f"Ошибка при обучении модели ARIMA: {str(e)}")
             raise ValueError(f"Не удалось обучить модель ARIMA: {str(e)}")
 
     def forecast(self, horizon):
@@ -87,5 +78,4 @@ class ARIMAModel:
             logging.info(f"Оценка прогноза: MAE={mae:.4f}, RMSE={rmse:.4f}")
             return mae, rmse
         except Exception as e:
-            logging.error(f"Ошибка оценки прогноза ARIMA: {str(e)}")
             raise ValueError(f"Не удалось оценить прогноз: {str(e)}")

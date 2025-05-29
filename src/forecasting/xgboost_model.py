@@ -1,8 +1,9 @@
 import logging
 import numpy as np
 import pandas as pd
-from xgboost import XGBRegressor
+import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import train_test_split
 from src.preprocessing.norm_fix import NormFix
 
 class XGBoostModel:
@@ -10,22 +11,28 @@ class XGBoostModel:
         self.config = config
         self.model = None
         self.train_data = None
+        self.booster = None
         self.lookback = config['preprocessing'].get('period', 24) * 7
         self.horizon = config['forecasting'].get('horizon', 168)
+        self.num_boost_round = config['forecasting'].get('xgboost', {}).get('num_boost_round', 400)
         self.params = {
-            'n_estimators': config['forecasting'].get('xgboost', {}).get('n_estimators', 200),
-            'max_depth': config['forecasting'].get('xgboost', {}).get('max_depth', 6),
-            'learning_rate': config['forecasting'].get('xgboost', {}).get('learning_rate', 0.05),
-            'gamma': config['forecasting'].get('xgboost', {}).get('gamma', 0),
-            'lambda': config['forecasting'].get('xgboost', {}).get('lambda', 1),
+            'max_depth': config['forecasting'].get('xgboost', {}).get('max_depth', 8),
+            'learning_rate': config['forecasting'].get('xgboost', {}).get('learning_rate', 0.1),
+            'gamma': config['forecasting'].get('xgboost', {}).get('gamma', 0.1),
+            'lambda': config['forecasting'].get('xgboost', {}).get('lambda', 2),
+            'subsample': config['forecasting'].get('xgboost', {}).get('subsample', 0.8),
+            'colsample_bytree': config['forecasting'].get('xgboost', {}).get('colsample_bytree', 0.8),
+            'min_child_weight': config['forecasting'].get('xgboost', {}).get('min_child_weight', 1),
             'objective': 'reg:squarederror',
-            'random_state': 42,
-            'enable_categorical': True
+            'random_state': 42
         }
+        self.early_stopping_rounds = config['forecasting'].get('xgboost', {}).get('early_stopping_rounds', 10)
         self.norm = NormFix(
             method=config.get('preprocessing', {}).get('norm_method', 'minmax'),
             params_file=config.get('data', {}).get('norm_params', 'data/processed/norm_params.json')
         )
+        logging.info(f"Инициализированы параметры XGBoost -  {self.params}")
+        logging.info(f"Количество итераций (num_boost_round): {self.num_boost_round}")
 
     def _create_features(self, data):
         df = data.copy()
@@ -40,9 +47,7 @@ class XGBoostModel:
         df['is_weekend'] = df['time_dt'].dt.dayofweek.isin([5, 6]).astype(int)
 
         if 'group' not in df.columns:
-            logging.warning("добавляем фиктивный столбец")
             df['group'] = 'default_group'
-        logging.debug(f"Уникальные значения столбца 'group': {df['group'].unique()}")
 
         df = pd.get_dummies(df, columns=['group'], drop_first=False, dtype=int)
 
@@ -50,7 +55,7 @@ class XGBoostModel:
             df[f'lag_{lag}'] = df[f'lag_{lag}'].fillna(df['target'].mean()).astype(float)
 
         if df.isna().any().any():
-            logging.warning("В данных есть пропуски после заполнения лагов, заполняю средними значениями")
+            logging.warning("В данных есть пропуски после заполнения лагов!!!, заполняю средними значениями")
             df = df.fillna(df.mean(numeric_only=True))
 
         return df
@@ -67,9 +72,24 @@ class XGBoostModel:
         X = features_df.drop(columns=['time_dt', 'target'])
         y = features_df['target']
 
-        self.model = XGBRegressor(**self.params)
-        self.model.fit(X, y)
+        #  тренировочные и валидационные данные - поппытка снизить переобучение
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval = xgb.DMatrix(X_val, label=y_val)
+
+        self.booster = xgb.train(
+            self.params,
+            dtrain,
+            num_boost_round=self.num_boost_round,
+            evals=[(dtrain, 'train'), (dval, 'val')],
+            early_stopping_rounds=self.early_stopping_rounds,
+            verbose_eval=False
+        )
+        self.model = self.booster
         logging.info(f"Модель XGBoost обучена для группы {train_data['group'].iloc[0] if 'group' in train_data.columns else 'default_group'}")
+        logging.info(f"Лучшая итерация: {self.booster.best_iteration}")
 
     def forecast(self, horizon):
         if self.model is None:
@@ -84,7 +104,7 @@ class XGBoostModel:
         if len(last_data) < self.lookback:
             logging.warning(f"Недостаточно данных для lookback ({len(last_data)} вместо {self.lookback})")
         if len(last_data) < horizon:
-            logging.warning(f"Недостаточно данных для прогноза ({len(last_data)} вместо {horizon}")
+            logging.warning(f"Недостаточно данных для прогноза ({len(last_data)} вместо {horizon})")
 
         forecast_vals = []
         current_data = last_data.copy()
@@ -113,7 +133,8 @@ class XGBoostModel:
                     forecast_vals.extend([0] * (horizon - i))
                 break
 
-            pred = self.model.predict(X)[0]
+            dtest = xgb.DMatrix(X)
+            pred = self.model.predict(dtest)[0]
             forecast_vals.append(pred)
 
             new_row = current_data.iloc[-1].copy()
@@ -137,7 +158,6 @@ class XGBoostModel:
 
             current_data = pd.concat([current_data, new_row.to_frame().T], ignore_index=True)
 
-            # Приведение типов
             for lag in [24, 48, 168]:
                 current_data[f'lag_{lag}'] = current_data[f'lag_{lag}'].astype(float)
             current_data['hour'] = current_data['hour'].astype(int)

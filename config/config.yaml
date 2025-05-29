@@ -11,11 +11,11 @@ data:
 preprocessing:
   target_column: A_plus
   period: 24
-  miss_method: seasonal # 'linear', 'seasonal', 'knn'
-  anom_method: stl  #  'rf' или 'stl'
+  miss_method: knn  # 'linear', 'seasonal', 'knn'
+  anom_method: mixed  # 'rf' или 'stl' или 'mixed'
   anom_act: mixed
-  norm_method: minmax  # 'minmax', 'log', 'user_minmax'
-  k: 4
+  norm_method: log  # 'minmax', 'log', 'user_minmax'
+  k: 5
   thresh: 4.0
   rf_n_estimators: 150
   lookback: 168
@@ -24,11 +24,11 @@ preprocessing:
   process_normalization: true
 
 forecasting:
-  model: xgboost  # Можно выбрать arima nbeats xgboost
+  model: nbeats  # Можно выбрать arima, nbeats, xgboost
   horizon: 168
   horizons: [72, 96, 120, 144, 168]  # Горизонты для кросс-валидации
   arima:
-    order: [2, 0, 2]
+    order: [2, 0, 1]
     auto: true
     s: 24
   nbeats:
@@ -36,13 +36,17 @@ forecasting:
     num_blocks: 3
     num_layers: 4
     layer_widths: 512
-    n_epochs: 5
+    n_epochs: 100
   xgboost:
-    n_estimators: 200
+    num_boost_round: 400
     max_depth: 6
-    learning_rate: 0.05
-    gamma: 0
-    lambda: 1
+    learning_rate: 0.1
+    gamma: 0.1
+    lambda: 2
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 3
+    early_stopping_rounds: 10
 
 graphics:
   output_dir: graphics

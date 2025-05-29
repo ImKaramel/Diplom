@@ -65,9 +65,9 @@ class TimeSeriesAnalyzer:
     def plot_distribution(self, df):
         plt.figure(figsize=(10, 6))
         df[self.target_column].hist(bins=50)
-        plt.title(f'Distribution of {self.target_column}')
+        plt.title(f'Распределение {self.target_column}')
         plt.xlabel(self.target_column)
-        plt.ylabel('Frequency')
+        plt.ylabel('Частота')
         plt.grid(True)
         subdir = os.path.join(self.graphics_dir, 'main_information')
         os.makedirs(subdir, exist_ok=True)
@@ -76,7 +76,11 @@ class TimeSeriesAnalyzer:
         logging.info("Диаграмма распределения сохранена в main_information/диаграмма_распределения.png")
 
     def plot_stl_decomposition(self, df, groupby='group'):
-        for group in df[groupby].unique()[:5]:
+        all_trends = []
+        all_seasonals = []
+        all_resids = []
+
+        for group in df[groupby].unique():
             group_logger = self._setup_group_logger(group)
             group_data = df[df[groupby] == group].copy()
             group_data['time_dt'] = pd.to_datetime(group_data['time_dt'])
@@ -89,6 +93,10 @@ class TimeSeriesAnalyzer:
                     group_logger.info(f"Среднее тренда: {result.trend.mean()}")
                     group_logger.info(f"Среднее сезонности: {result.seasonal.mean()}")
                     group_logger.info(f"Среднее остатков: {result.resid.mean()}")
+
+                    all_trends.extend(result.trend.dropna())
+                    all_seasonals.extend(result.seasonal.dropna())
+                    all_resids.extend(result.resid.dropna())
 
                     plt.figure(figsize=(10, 8))
                     plt.subplot(4, 1, 1)
@@ -116,6 +124,14 @@ class TimeSeriesAnalyzer:
                     group_logger.info(f"STL-график сохранён в main_information/stl_decomposition_{group}.png")
                 except Exception as e:
                     group_logger.error(f"Ошибка STL для uuid_{group}: {str(e)}")
+
+        if all_trends and all_seasonals and all_resids:
+            avg_trend = pd.Series(all_trends).mean()
+            avg_seasonal = pd.Series(all_seasonals).mean()
+            avg_resid = pd.Series(all_resids).mean()
+            logging.info(f"Средний тренд по всем группам: {avg_trend}")
+            logging.info(f"Средняя сезонность по всем группам: {avg_seasonal}")
+            logging.info(f"Средний остаточный компонент по всем группам: {avg_resid}")
 
     def analyze(self, df, groupby='group'):
         logging.info("Начало анализа временных рядов")

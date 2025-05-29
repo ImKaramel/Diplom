@@ -86,6 +86,16 @@ def main():
         graphics_dir=config['graphics']['output_dir'],
         norm_fix=norm_fix
     )
+
+    for group in clean_data['group'].unique()[:5]:
+        group_data = clean_data[clean_data['group'] == group].copy()
+        group_data['time_dt'] = pd.to_datetime(group_data['time_dt'])
+        group_data = group_data.set_index('time_dt')['target'].dropna()
+        if len(group_data) > analyzer.period:
+            analyzer.test_stationarity(group_data, name=f"uuid_{group}_cleaned")
+            analyzer.plot_acf_pacf(group_data, lags=40, title=f"uuid_{group}_cleaned")
+
+
     model_type = config['forecasting'].get('model', 'arima').lower()
     logging.info(f"Начало прогнозирования с помощью {model_type.upper()}")
 

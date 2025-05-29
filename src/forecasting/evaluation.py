@@ -58,7 +58,6 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
     group_df = df[df['group'] == group].copy().sort_values(time_col)
 
     if group_df[time_col].duplicated().any():
-        logging.warning(f"Найдены повторяющиеся даты для группы {group}, использую среднее")
         group_df = group_df.groupby(time_col).agg({target: 'mean'}).reset_index()
         group_df['group'] = group
 
@@ -96,7 +95,7 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
         start=group_df[time_col].iloc[-1] + pd.Timedelta(hours=1),
         periods=horizon, freq='h'
     )
-    logging.info(f"Создание DataFrame прогноза для группы {group}")
+
     forecast_df = pd.DataFrame({
         time_col: forecast_time,
         'group': [group] * horizon,
@@ -122,7 +121,7 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
     test_vals_denorm = test_denorm['target'].values
 
     min_len = min(len(test_vals_denorm), len(forecast_denorm['forecast'].values))
-    mae, rmse = None, None, None
+    mae, rmse = None, None
     if min_len > 0:
         mae, rmse = evaluate_forecast(test_vals_denorm[:min_len], forecast_denorm['forecast'].values[:min_len])
         logging.info(f"Группа {group}: MAE = {mae:.4f}, RMSE = {rmse:.4f}")
@@ -277,7 +276,7 @@ def forecast(config, data, file_path, model_name, model_init):
             model.order = (1, d, 1)
 
         logging.info(f"Финальный прогноз для группы {group}")
-        forecast_df, mae, rmse, r2 = _prepare_and_forecast(
+        forecast_df, mae, rmse = _prepare_and_forecast(
             df, group, 'time_dt', 'target', lookback, max_horizon, model, model_name, norm, plot_dir=analyzer.graphics_dir
         )
         if forecast_df is not None:
