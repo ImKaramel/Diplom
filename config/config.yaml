@@ -12,15 +12,15 @@ preprocessing:
   target_column: A_plus
   period: 24
   miss_method: knn  # 'linear', 'seasonal', 'knn'
-  anom_method: mixed  # 'rf' или 'stl' или 'mixed'
-  anom_act: mixed
+  anom_method: iqr  # 'rf' или 'stl' или 'mixed' iqr
+  anom_act: interpolate
   norm_method: log  # 'minmax', 'log', 'user_minmax'
   k: 5
   thresh: 4.0
   rf_n_estimators: 150
   lookback: 168
   process_missing: true
-  process_anomalies: false
+  process_anomalies: true
   process_normalization: true
 
 forecasting:

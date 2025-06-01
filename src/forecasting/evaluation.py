@@ -50,10 +50,9 @@ def cross_validation(df, group_col, target_col, folds=5, horizon=24):
 def evaluate_forecast(actual, predicted):
     mae = mean_absolute_error(actual, predicted)
     rmse = np.sqrt(mean_squared_error(actual, predicted))
-
     return mae, rmse
 
-def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model, model_name, norm, plot_dir='graphics'):
+def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model, model_name, norm, plot_dir='graphics', is_normalized=False):
     logging.info(f"Подготовка данных для группы {group}, модель {model_name}")
     group_df = df[df['group'] == group].copy().sort_values(time_col)
 
@@ -83,7 +82,6 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
     lower_ci = conf_int['lower'].to_numpy() if conf_int is not None else np.full(horizon, np.nan)
     upper_ci = conf_int['upper'].to_numpy() if conf_int is not None else np.full(horizon, np.nan)
 
-    # Проверка длины прогноза
     if len(forecast_vals) < horizon:
         logging.warning(f"Прогноз для группы {group} короче ожидаемого ({len(forecast_vals)} вместо {horizon}), дополняю нули")
         forecast_vals = np.pad(forecast_vals, (0, horizon - len(forecast_vals)), mode='constant', constant_values=0)
@@ -105,20 +103,28 @@ def _prepare_and_forecast(df, group, time_col, target, lookback, horizon, model,
         forecast_df['lower_ci'] = lower_ci.flatten()
         forecast_df['upper_ci'] = upper_ci.flatten()
 
-    logging.info(f"Денормализация прогноза для группы {group}")
-    forecast_denorm = norm.denormalize(forecast_df, col='forecast', group='group')
-    if model_name != 'nbeats' and 'lower_ci' in forecast_denorm.columns:
-        forecast_denorm = norm.denormalize(forecast_denorm, col='lower_ci', group='group')
-        forecast_denorm = norm.denormalize(forecast_denorm, col='upper_ci', group='group')
+
+    if is_normalized:
+        logging.info(f"Денормализация прогноза для группы {group}")
+        forecast_denorm = norm.denormalize(forecast_df, col='forecast', group='group')
+        if model_name != 'nbeats' and 'lower_ci' in forecast_denorm.columns:
+            forecast_denorm = norm.denormalize(forecast_denorm, col='lower_ci', group='group')
+            forecast_denorm = norm.denormalize(forecast_denorm, col='upper_ci', group='group')
+    else:
+        forecast_denorm = forecast_df.copy()
 
     test_df = pd.DataFrame({
         time_col: forecast_time[:len(test_vals)],
         'target': test_vals,
         'group': [group] * len(test_vals)
     })
-    logging.info(f"Денормализация тестовых данных для группы {group}")
-    test_denorm = norm.denormalize(test_df, col='target', group='group')
-    test_vals_denorm = test_denorm['target'].values
+    if is_normalized:
+        logging.info(f"Денормализация тестовых данных для группы {group}")
+        test_denorm = norm.denormalize(test_df, col='target', group='group')
+        test_vals_denorm = test_denorm['target'].values
+    else:
+        test_denorm = test_df.copy()
+        test_vals_denorm = test_vals
 
     min_len = min(len(test_vals_denorm), len(forecast_denorm['forecast'].values))
     mae, rmse = None, None
@@ -172,6 +178,7 @@ def forecast(config, data, file_path, model_name, model_init):
     norm_method = config.get('preprocessing', {}).get('norm_method', 'minmax')
     norm_file = config.get('data', {}).get('norm_params', 'data/processed/norm_params.json')
     norm = NormFix(method=norm_method, params_file=norm_file)
+    is_normalized = config.get('preprocessing', {}).get('process_normalization', False)
 
     horizon = config['forecasting'].get('horizon', 24)
     lookback = config['preprocessing'].get('period', 24) * 7
@@ -243,18 +250,22 @@ def forecast(config, data, file_path, model_name, model_init):
                     actual = actual[:min_len]
 
                 forecast_df = pd.DataFrame({'time_dt': time, 'target': forecast, 'group': [group] * min_len})
-                forecast_denorm = norm.denormalize(forecast_df, col='target', group='group')['target'].values
+                if is_normalized:
+                    forecast_denorm = norm.denormalize(forecast_df, col='target', group='group')['target'].values
+                else:
+                    forecast_denorm = forecast
                 actual_df = pd.DataFrame({'time_dt': time, 'target': actual, 'group': [group] * min_len})
-                actual_denorm = norm.denormalize(actual_df, col='target', group='group')['target'].values
+                if is_normalized:
+                    actual_denorm = norm.denormalize(actual_df, col='target', group='group')['target'].values
+                else:
+                    actual_denorm = actual
 
                 fold_mae, fold_rmse = evaluate_forecast(actual_denorm, forecast_denorm)
                 mae += fold_mae
                 rmse += fold_rmse
-                # r2 += fold_r2
 
             mae /= fold_count
             rmse /= fold_count
-            # r2 /= fold_count
             group_results[horizon] = {'MAE': mae, 'RMSE': rmse}
             logging.info(f"Группа {group}, горизонт {horizon}: MAE={mae:.2f}, RMSE={rmse:.2f}")
 
@@ -277,7 +288,7 @@ def forecast(config, data, file_path, model_name, model_init):
 
         logging.info(f"Финальный прогноз для группы {group}")
         forecast_df, mae, rmse = _prepare_and_forecast(
-            df, group, 'time_dt', 'target', lookback, max_horizon, model, model_name, norm, plot_dir=analyzer.graphics_dir
+            df, group, 'time_dt', 'target', lookback, max_horizon, model, model_name, norm, plot_dir=analyzer.graphics_dir, is_normalized=is_normalized
         )
         if forecast_df is not None:
             forecasts_df = pd.concat([forecasts_df, forecast_df], ignore_index=True)
@@ -300,7 +311,6 @@ def forecast(config, data, file_path, model_name, model_init):
         output_path = config['data']['forecasts'].replace('.csv', f'_{model_name}.csv') if model_name == 'xgboost' else config['data']['forecasts']
         forecasts_df.to_csv(output_path, index=False, sep='\t')
         logging.info(f"Прогнозы сохранены в {output_path}")
-
 
         metrics_df = pd.DataFrame(metrics_list)
         metrics_path = os.path.join(forecast_dir, f'metrics_{model_name}.csv')

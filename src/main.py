@@ -110,10 +110,10 @@ def main():
         logging.info(f"Минимальное значение A_plus - {min_value}")
         logging.info(f"Максимальное значение A_plus - {max_value}")
 
-        analyzer = TimeSeriesAnalyzer(target_column='A_plus', period=config['preprocessing'].get('period', 24),
-                                      graphics_dir=config['graphics'].get('output_dir', 'graphics'), config=config)
-        analyzer.analyze(raw_data, groupby='uuid')
-        logging.info("Анализ временных рядов завершён")
+        # analyzer = TimeSeriesAnalyzer(target_column='A_plus', period=config['preprocessing'].get('period', 24),
+        #                               graphics_dir=config['graphics'].get('output_dir', 'graphics'), config=config)
+        # analyzer.analyze(raw_data, groupby='uuid')
+        # logging.info("Анализ временных рядов завершён")
 
         data_prep = DataPrep(config)
         clean_data, used_methods = data_prep.prepare(raw_data, target='A_plus', group='uuid')

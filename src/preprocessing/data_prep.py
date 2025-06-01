@@ -20,7 +20,7 @@ class DataPrep:
         self.process_normalization = config['preprocessing'].get('process_normalization', True)
 
         valid_miss = ['linear', 'seasonal', 'knn']
-        valid_anom = ['stl', 'rf', 'mixed']
+        valid_anom = ['stl', 'rf', 'mixed', 'iqr']
         valid_act = ['interpolate', 'remove', 'mixed']
         valid_norm = ['minmax', 'log', 'user_minmax']
 

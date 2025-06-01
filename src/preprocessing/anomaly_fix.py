@@ -1,24 +1,20 @@
 import logging
 import os
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.seasonal import STL
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
-
-from src.utils.logging_config import setup_group_logging
-
 
 class AnomalyFix:
     def __init__(self, config):
-        self.method = config['preprocessing'].get('anom_method', 'mixed')  # mixed, rf, или stl
+        self.method = config['preprocessing'].get('anom_method', 'iqr')  # iqr, stl, rf, mixed
         self.action = config['preprocessing'].get('anom_act', 'interpolate')  # interpolate, remove
         self.period = config['preprocessing'].get('period', 24)  # Суточный период
         self.k = config['preprocessing'].get('k', 4)  # Порог для STL
         self.thresh = config['preprocessing'].get('thresh', 4.0)  # Порог для RF
-        self.n_estimators = config['preprocessing'].get('rf_n_estimators', 150)  # Кол-во деревьев
+        self.n_estimators = config['preprocessing'].get('rf_n_estimators', 150)  # Кол-во деревьев для RF
         self.scaler = StandardScaler()
         self.anomaly_logger = logging.getLogger('anomaly_logger')
         self.anomaly_logger.setLevel(logging.INFO)
@@ -27,18 +23,20 @@ class AnomalyFix:
         self.anomaly_logger.handlers = []
         self.anomaly_logger.addHandler(anomaly_handler)
 
-    def _linear_interpolation(self, series, indices, logger):
+    def _linear_interpolation(self, series, anomaly_positions, original_indices, df, column, group, group_id, logger):
         interpolated = series.copy()
-        for idx in indices:
-            prev_idx = next((i for i in range(idx-1, -1, -1) if not np.isnan(series[i]) and i not in indices), None)
-            next_idx = next((i for i in range(idx+1, len(series)) if not np.isnan(series[i]) and i not in indices), None)
+        group_mean = df[df[group] == group_id][column].mean()
+        fallback_mean = df[column].mean() if np.isnan(group_mean) else group_mean
+        for pos in anomaly_positions:
+            prev_idx = next((i for i in range(pos-1, -1, -1) if i not in anomaly_positions and not np.isnan(series[i])), None)
+            next_idx = next((i for i in range(pos+1, len(series)) if i not in anomaly_positions and not np.isnan(series[i])), None)
+            orig_idx = original_indices[anomaly_positions.index(pos)]
             if prev_idx is not None and next_idx is not None:
                 y_prev, y_next = series[prev_idx], series[next_idx]
-                interpolated[idx] = y_prev + (y_next - y_prev) * (idx - prev_idx) / (next_idx - prev_idx)
-                logger.info(f"Интерполяция на индексе {idx}: {interpolated[idx]:.2f} (от {y_prev:.2f} до {y_next:.2f})")
+                interpolated[pos] = y_prev + (y_next - y_prev) * (pos - prev_idx) / (next_idx - prev_idx)
             else:
-                interpolated[idx] = np.nan
-                logger.warning(f"Интерполяция на индексе {idx} невозможна, значение установлено как NaN")
+                interpolated[pos] = fallback_mean
+                logger.warning(f"Интерполяция на индексе {orig_idx} невозможна, использовано среднее значение {fallback_mean:.2f}")
         return interpolated
 
     def _stl_anomaly_detection(self, series, logger):
@@ -50,8 +48,6 @@ class AnomalyFix:
             threshold = self.k * sigma_R
             anomalies = np.abs(residuals) > threshold
             anomaly_indices = series.index[anomalies]
-            logger.info(f"STL: Обнаружено {len(anomaly_indices)} аномалий, порог {threshold:.2f}")
-            self.anomaly_logger.info(f"STL: Аномалии на индексах {list(anomaly_indices)}")
             return anomaly_indices
         except Exception as e:
             logger.error(f"Ошибка в STL-разложении: {str(e)}")
@@ -63,7 +59,6 @@ class AnomalyFix:
         for group_id in df[group].unique():
             group_data = df[df[group] == group_id].copy()
             if len(group_data) < self.period:
-                logger.warning(f"Группа {group_id}: Недостаточно данных ({len(group_data)} < {self.period})")
                 continue
 
             group_data['lag1'] = group_data[column].shift(1)
@@ -75,7 +70,6 @@ class AnomalyFix:
             valid_data = group_data.dropna(subset=feature_cols + [column])
 
             if len(valid_data) < self.n_estimators // 10:
-                logger.warning(f"Группа {group_id}: Недостаточно данных для RF ({len(valid_data)} < {self.n_estimators // 10})")
                 continue
 
             X = valid_data[feature_cols]
@@ -91,29 +85,43 @@ class AnomalyFix:
             anomaly_mask = errors > threshold
             group_anomalies = valid_data.index[anomaly_mask]
             anomaly_indices.extend(group_anomalies)
-            logger.info(f"Группа {group_id}: RF обнаружено {len(group_anomalies)} аномалий, порог {threshold:.2f}")
-            self.anomaly_logger.info(f"Группа {group_id}: RF аномалии на индексах {list(group_anomalies)}")
+        return pd.Index(anomaly_indices)
+
+    def _iqr_anomaly_detection(self, df, column, group, logger):
+        anomaly_indices = []
+        for group_id in df[group].unique():
+            group_data = df[df[group] == group_id][column].dropna()
+            if len(group_data) < 10:
+                continue
+            Q1 = group_data.quantile(0.25)
+            Q3 = group_data.quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            anomaly_mask = (group_data < lower_bound) | (group_data > upper_bound)
+            group_anomalies = group_data.index[anomaly_mask]
+            anomaly_indices.extend(group_anomalies)
         return pd.Index(anomaly_indices)
 
     def _detect_anomalies(self, df, column, group, time_column):
         all_anomalies = pd.Index([])
-        logger = setup_group_logging(df[group].iloc[0])
+        logger = logging.getLogger('anomaly_logger')
 
         if self.method == 'stl':
             for group_id in df[group].unique():
                 group_data = df[df[group] == group_id][column].dropna()
                 if len(group_data) < self.period:
-                    logger.warning(f"Группа {group_id}: Пропуск из-за недостатка данных")
                     continue
                 stl_indices = self._stl_anomaly_detection(group_data, logger)
                 all_anomalies = all_anomalies.union(stl_indices)
         elif self.method == 'rf':
             all_anomalies = self._rf_anomaly_detection(df, column, group, time_column, logger)
+        elif self.method == 'iqr':
+            all_anomalies = self._iqr_anomaly_detection(df, column, group, logger)
         else:  # mixed
             for group_id in df[group].unique():
                 group_data = df[df[group] == group_id][column].dropna()
                 if len(group_data) < self.period:
-                    logger.warning(f"Группа {group_id}: Пропуск из-за недостатка данных")
                     continue
                 stl = STL(group_data, period=self.period, robust=True)
                 result = stl.fit()
@@ -131,7 +139,7 @@ class AnomalyFix:
             raise ValueError("Отсутствуют необходимые столбцы")
 
         df_copy = df.copy()
-        logger = setup_group_logging(df[group].iloc[0])
+        logger = logging.getLogger('anomaly_logger')
         logger.info(f"Начало обработки аномалий методом {self.method}")
         self.anomaly_logger.info(f"Начало обработки аномалий методом {self.method}")
 
@@ -143,35 +151,28 @@ class AnomalyFix:
             return df_copy
 
         anomaly_values = df_copy.loc[anomaly_indices, column].to_dict()
-        logger.info(f"Обнаружены аномалии: {anomaly_values}")
-        self.anomaly_logger.info(f"Обнаружены аномалии: {anomaly_values}")
+        #logger.info(f"Обнаружены аномалии: {anomaly_values}")
+        #self.anomaly_logger.info(f"Обнаружены аномалии: {anomaly_values}")
 
-        if self.action == 'interpolate' or (self.action == 'mixed' and not any(df_copy.loc[anomaly_indices, column] > 1500)):
+        if self.action == 'interpolate':
             for group_id in df_copy[group].unique():
                 mask = df_copy[group] == group_id
-                group_logger = setup_group_logging(group_id)
-                group_indices = [idx for idx in anomaly_indices if idx in df_copy[mask].index]
+                group_data = df_copy.loc[mask].copy()
+                group_indices = [idx for idx in anomaly_indices if idx in group_data.index]
                 if group_indices:
-                    series = df_copy.loc[mask, column].values
-                    indices = [df_copy.loc[mask].index.get_loc(idx) for idx in group_indices]
-                    interpolated = self._linear_interpolation(series, indices, group_logger)
-                    df_copy.loc[mask, column] = interpolated
-        elif self.action in ['remove', 'mixed']:
+                    series = group_data[column].values
+                    anomaly_positions = [group_data.index.get_loc(idx) for idx in group_indices]
+                    interpolated = self._linear_interpolation(series, anomaly_positions, group_indices, df_copy, column, group, group_id, logger)
+                    for i, orig_idx in enumerate(group_indices):
+                        pos = anomaly_positions[i]
+                        if not np.isnan(interpolated[pos]):
+                            df_copy.loc[orig_idx, column] = interpolated[pos]
+        elif self.action == 'remove':
             df_copy.loc[anomaly_indices, column] = np.nan
             df_copy[column] = df_copy.groupby(group)[column].transform(
                 lambda x: x.interpolate(method='linear').bfill().ffill())
             logger.info(f"Аномалии удалены и интерполированы для {len(anomaly_indices)} точек")
             self.anomaly_logger.info(f"Аномалии удалены и интерполированы для {len(anomaly_indices)} точек")
-
-        original_data = df[df[column].notna()][column]
-        processed_data = df_copy[df_copy[column].notna()][column]
-        if len(original_data) > 0 and len(processed_data) > 0:
-            min_len = min(len(original_data), len(processed_data))
-            mae = np.mean(np.abs(original_data[:min_len] - processed_data[:min_len]))
-            rmse = np.sqrt(np.mean((original_data[:min_len] - processed_data[:min_len])**2))
-            logger.info(f"MAE: {mae:.4f}, RMSE: {rmse:.4f} после обработки")
-            self.anomaly_logger.info(f"MAE: {mae:.4f}, RMSE: {rmse:.4f} после обработки")
-
 
         plt.figure(figsize=(12, 6))
         plt.plot(df_copy[time_column], df_copy[column], label='Данные', color='blue')
@@ -179,7 +180,7 @@ class AnomalyFix:
                     color='red', label='Аномалии', s=50)
         plt.title(f"Аномалии в данных группы {group}")
         plt.xlabel('Время')
-        plt.ylabel('Потребление энергии (кВт·ч)')
+        plt.ylabel('Потребление энергии (Вт·ч)')
         plt.legend()
         plt.grid(True)
         os.makedirs('graphics/anomalies', exist_ok=True)
