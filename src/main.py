@@ -8,6 +8,61 @@ from forecasting.evaluation import forecast_arima, forecast_nbeats, forecast_xgb
 from preprocessing.norm_fix import NormFix
 from preprocessing.data_prep import DataPrep
 
+
+def calculate_average_metrics(csv_file, model):
+    try:
+        df = pd.read_csv(csv_file, sep='\t')
+
+        df.columns = [col.lower() for col in df.columns]
+
+        df['horizon'] = pd.to_numeric(df['horizon'], errors='coerce')
+
+        df_168 = df[df['horizon'] == 168].copy()
+        df_168.loc[:, 'evaluation_type'] = df_168['evaluation_type'].str.lower()
+
+        final_forecast_168 = df_168[df_168['evaluation_type'] == 'final_forecast']
+
+        final_mae_168 = final_forecast_168['mae'].mean()
+        final_rmse_168 = final_forecast_168['rmse'].mean()
+
+        unique_horizons = sorted(df['horizon'].unique())  # [72, 96, 120, 144, 168]
+        horizon_results = {}
+        for horizon in unique_horizons:
+            df_horizon = df[df['horizon'] == horizon].copy()
+            df_horizon.loc[:, 'evaluation_type'] = df_horizon['evaluation_type'].str.lower()
+            cross_val_h = df_horizon[df_horizon['evaluation_type'] == 'cross-validation']
+            final_forecast_h = df_horizon[df_horizon['evaluation_type'] == 'final_forecast']
+            horizon_results[horizon] = {
+                'cross_val_mae': cross_val_h['mae'].mean(),
+                'cross_val_rmse': cross_val_h['rmse'].mean(),
+                'final_mae': final_forecast_h['mae'].mean(),
+                'final_rmse': final_forecast_h['rmse'].mean()
+            }
+
+        output_dir = 'data/forecasts'
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f'{model}_average.txt')
+        with open(output_file, 'w') as f:
+            f.write("Метрики финального прогноза:\n")
+            f.write(f"MAE, кВт·ч: {final_mae_168:.2f}\n")
+            f.write(f"RMSE, кВт·ч: {final_rmse_168:.2f}\n")
+            f.write("\nСреднее по всем группам (по горизонтам):\n")
+            for horizon in unique_horizons:
+                results = horizon_results[horizon]
+                f.write(f"\nГоризонт {horizon} часов:\n")
+                f.write("Метрики кросс-валидации:\n")
+                f.write(f"MAE, кВт·ч: {results['cross_val_mae']:.2f}\n")
+                f.write(f"RMSE, кВт·ч: {results['cross_val_rmse']:.2f}\n")
+
+            f.write("\n")
+        print(f"saved in {output_file}")
+
+    except FileNotFoundError:
+        print(f"Error: File '{csv_file}' not found")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
 def main():
     setup_logging(log_file='logs/project.log')
 
@@ -40,6 +95,9 @@ def main():
 
         raw_data = pd.read_csv(raw_data_path, sep='\t')
         logging.info(f"Загружены исходные данные {raw_data_path}")
+        # Беру только 10 пользователей
+        top_10_uuids = raw_data['uuid'].unique()[:10]
+        raw_data = raw_data[raw_data['uuid'].isin(top_10_uuids)]
 
         start_date = raw_data['time_dt'].min()
         end_date = raw_data['time_dt'].max()
@@ -67,7 +125,6 @@ def main():
         os.makedirs(os.path.dirname(expected_full_path), exist_ok=True)
         clean_data.to_csv(expected_full_path, sep='\t', index=False)
         logging.info(f"Предобработанные данные сохранены в: {expected_full_path}")
-
 
     column_mapping = config.get('data', {}).get('column_mapping', {
         'group': 'uuid',
@@ -109,6 +166,7 @@ def main():
         raise ValueError(f"Неподдерживаемая модель: {model_type}. Используйте 'arima', 'nbeats' или 'xgboost'.")
 
     logging.info("Прогнозирование завершено")
+    calculate_average_metrics(f"data/forecasts/metrics_{model_type}.csv", model_type)
 
 
 if __name__ == "__main__":

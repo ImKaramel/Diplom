@@ -20,7 +20,7 @@ preprocessing:
   rf_n_estimators: 150
   lookback: 168
   process_missing: true
-  process_anomalies: true
+  process_anomalies: false
   process_normalization: true
 
 forecasting:
@@ -36,7 +36,7 @@ forecasting:
     num_blocks: 3
     num_layers: 4
     layer_widths: 512
-    n_epochs: 100
+    n_epochs: 50
   xgboost:
     num_boost_round: 400
     max_depth: 6
