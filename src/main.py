@@ -9,58 +9,45 @@ from preprocessing.norm_fix import NormFix
 from preprocessing.data_prep import DataPrep
 
 
-def calculate_average_metrics(csv_file, model):
+def compute_metrics(data_file, model_name):
     try:
-        df = pd.read_csv(csv_file, sep='\t')
-
+        df = pd.read_csv(data_file, sep='\t')
         df.columns = [col.lower() for col in df.columns]
-
         df['horizon'] = pd.to_numeric(df['horizon'], errors='coerce')
 
-        df_168 = df[df['horizon'] == 168].copy()
-        df_168.loc[:, 'evaluation_type'] = df_168['evaluation_type'].str.lower()
-
-        final_forecast_168 = df_168[df_168['evaluation_type'] == 'final_forecast']
-
-        final_mae_168 = final_forecast_168['mae'].mean()
-        final_rmse_168 = final_forecast_168['rmse'].mean()
-
-        unique_horizons = sorted(df['horizon'].unique())  # [72, 96, 120, 144, 168]
-        horizon_results = {}
-        for horizon in unique_horizons:
+        horizons = sorted(df['horizon'].unique())
+        results = {}
+        for horizon in horizons:
             df_horizon = df[df['horizon'] == horizon].copy()
-            df_horizon.loc[:, 'evaluation_type'] = df_horizon['evaluation_type'].str.lower()
-            cross_val_h = df_horizon[df_horizon['evaluation_type'] == 'cross-validation']
-            final_forecast_h = df_horizon[df_horizon['evaluation_type'] == 'final_forecast']
-            horizon_results[horizon] = {
-                'cross_val_mae': cross_val_h['mae'].mean(),
-                'cross_val_rmse': cross_val_h['rmse'].mean(),
-                'final_mae': final_forecast_h['mae'].mean(),
-                'final_rmse': final_forecast_h['rmse'].mean()
+            df_horizon['evaluation_type'] = df_horizon['evaluation_type'].str.lower()
+            cross_val = df_horizon[df_horizon['evaluation_type'] == 'cross-validation']
+            final_forecast = df_horizon[df_horizon['evaluation_type'] == 'final_forecast']
+            results[horizon] = {
+                'cross_val_mae': cross_val['mae'].mean() if not cross_val.empty else float('nan'),
+                'cross_val_rmse': cross_val['rmse'].mean() if not cross_val.empty else float('nan'),
+                'final_mae': final_forecast['mae'].mean() if not final_forecast.empty else float('nan'),
+                'final_rmse': final_forecast['rmse'].mean() if not final_forecast.empty else float('nan')
             }
 
         output_dir = 'data/forecasts'
         os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, f'{model}_average.txt')
-        with open(output_file, 'w') as f:
-            f.write("Метрики финального прогноза:\n")
-            f.write(f"MAE, кВт·ч: {final_mae_168:.2f}\n")
-            f.write(f"RMSE, кВт·ч: {final_rmse_168:.2f}\n")
-            f.write("\nСреднее по всем группам (по горизонтам):\n")
-            for horizon in unique_horizons:
-                results = horizon_results[horizon]
+        output_path = os.path.join(output_dir, f'{model_name}_average.txt')
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("\nСредние метрики за горизонт :\n")
+            for horizon in horizons:
                 f.write(f"\nГоризонт {horizon} часов:\n")
-                f.write("Метрики кросс-валидации:\n")
-                f.write(f"MAE, кВт·ч: {results['cross_val_mae']:.2f}\n")
-                f.write(f"RMSE, кВт·ч: {results['cross_val_rmse']:.2f}\n")
-
-            f.write("\n")
-        print(f"saved in {output_file}")
+                f.write("Cross-Validation метрики:\n")
+                f.write(f"MAE, в: {results[horizon]['cross_val_mae']:.2f}\n")
+                f.write(f"RMSE, в: {results[horizon]['cross_val_rmse']:.2f}\n")
+                f.write("Метрики фианльного прогноза:\n")
+                f.write(f"MAE, в: {results[horizon]['final_mae']:.2f}\n")
+                f.write(f"RMSE, в: {results[horizon]['final_rmse']:.2f}\n")
+        print(f"средние метрики  сохранены в {output_path}")
 
     except FileNotFoundError:
-        print(f"Error: File '{csv_file}' not found")
+        print(f"Error: File '{data_file}' not found")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {str(e)}")
 
 
 def main():
@@ -95,8 +82,8 @@ def main():
 
         raw_data = pd.read_csv(raw_data_path, sep='\t')
         logging.info(f"Загружены исходные данные {raw_data_path}")
-        # Беру только 10 пользователей
-        top_10_uuids = raw_data['uuid'].unique()[:10]
+        # Беру только 15 пользователей
+        top_10_uuids = raw_data['uuid'].unique()[:15]
         raw_data = raw_data[raw_data['uuid'].isin(top_10_uuids)]
 
         start_date = raw_data['time_dt'].min()
@@ -110,10 +97,10 @@ def main():
         logging.info(f"Минимальное значение A_plus - {min_value}")
         logging.info(f"Максимальное значение A_plus - {max_value}")
 
-        # analyzer = TimeSeriesAnalyzer(target_column='A_plus', period=config['preprocessing'].get('period', 24),
-        #                               graphics_dir=config['graphics'].get('output_dir', 'graphics'), config=config)
-        # analyzer.analyze(raw_data, groupby='uuid')
-        # logging.info("Анализ временных рядов завершён")
+        analyzer = TimeSeriesAnalyzer(target_column='A_plus',
+                                      graphics_dir=config['graphics'].get('output_dir', 'graphics'), config=config)
+        analyzer.analyze(raw_data, groupby='uuid')
+        logging.info("Анализ временных рядов завершён")
 
         data_prep = DataPrep(config)
         clean_data, used_methods = data_prep.prepare(raw_data, target='A_plus', group='uuid')
@@ -139,19 +126,19 @@ def main():
 
     analyzer = TimeSeriesAnalyzer(
         target_column='target',
-        period=config['preprocessing']['period'],
+        # period=config['preprocessing']['period'],
         graphics_dir=config['graphics']['output_dir'],
-        norm_fix=norm_fix
+        norm_fix=norm_fix,
+        config=config
     )
 
-    for group in clean_data['group'].unique()[:5]:
-        group_data = clean_data[clean_data['group'] == group].copy()
-        group_data['time_dt'] = pd.to_datetime(group_data['time_dt'])
-        group_data = group_data.set_index('time_dt')['target'].dropna()
-        if len(group_data) > analyzer.period:
-            analyzer.test_stationarity(group_data, name=f"uuid_{group}_cleaned")
-            analyzer.plot_acf_pacf(group_data, lags=40, title=f"uuid_{group}_cleaned")
-
+    # for group in clean_data['group'].unique()[:5]:
+    #     group_data = clean_data[clean_data['group'] == group].copy()
+    #     group_data['time_dt'] = pd.to_datetime(group_data['time_dt'])
+    #     group_data = group_data.set_index('time_dt')['target'].dropna()
+    #     if len(group_data) > analyzer.period:
+    #         analyzer.test_stationarity(group_data, name=f"uuid_{group}_cleaned")
+    #         analyzer.plot_acf_pacf(group_data, title=f"uuid_{group}_cleaned")
 
     model_type = config['forecasting'].get('model', 'arima').lower()
     logging.info(f"Начало прогнозирования с помощью {model_type.upper()}")
@@ -166,7 +153,7 @@ def main():
         raise ValueError(f"Неподдерживаемая модель: {model_type}. Используйте 'arima', 'nbeats' или 'xgboost'.")
 
     logging.info("Прогнозирование завершено")
-    calculate_average_metrics(f"data/forecasts/metrics_{model_type}.csv", model_type)
+    compute_metrics(f"data/forecasts/metrics_{model_type}.csv", model_type)
 
 
 if __name__ == "__main__":

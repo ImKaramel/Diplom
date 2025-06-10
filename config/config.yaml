@@ -19,6 +19,8 @@ preprocessing:
   thresh: 4.0
   rf_n_estimators: 150
   lookback: 168
+  seasonal_period : 24 # 168 / 720
+  acf_pacf_lags : 720
   process_missing: true
   process_anomalies: true
   process_normalization: true
@@ -26,27 +28,29 @@ preprocessing:
 forecasting:
   model: nbeats  # Можно выбрать arima, nbeats, xgboost
   horizon: 168
-  horizons: [72, 96, 120, 144, 168]  # Горизонты для кросс-валидации
-  arima:
-    order: [2, 0, 1]
-    auto: true
-    s: 24
+  horizons: [168, 360]  # Для кросс-валидации
+  final_horizon: 720  # Финальный прогноз на месяц
+  recursive_steps: 4  # 4 недели для месяца
   nbeats:
     num_stacks: 2
     num_blocks: 3
     num_layers: 4
     layer_widths: 512
     n_epochs: 50
+  arima:
+    order: [1, 0, 1]
+    auto: true
+    s: 24
   xgboost:
-    num_boost_round: 400
-    max_depth: 6
-    learning_rate: 0.1
-    gamma: 0.1
-    lambda: 2
-    subsample: 0.8
-    colsample_bytree: 0.8
+    num_boost_round: 300
+    max_depth: 10 # 9-10
+    learning_rate: 0.03 # 0.02–0.04
+    gamma: 0.005
+    lambda: 3
+    subsample: 0.87
+    colsample_bytree: 0.85
     min_child_weight: 3
-    early_stopping_rounds: 10
+    early_stopping_rounds: 20
 
 graphics:
   output_dir: graphics

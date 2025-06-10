@@ -1,5 +1,7 @@
 import logging
 import os
+
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -10,9 +12,9 @@ from src.utils.logging_config import setup_group_logging
 
 
 class TimeSeriesAnalyzer:
-    def __init__(self, target_column='A_plus', period=24, graphics_dir='graphics', norm_fix=None, config=None):
+    def __init__(self, target_column='A_plus', period = 24,  graphics_dir='graphics', norm_fix=None, config=None):
         self.target_column = target_column
-        self.period = period
+        self.period = config.get('preprocessing', {}).get('seasonal_period', 24)
         self.graphics_dir = graphics_dir
         self.norm_fix = norm_fix
         self.logs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
@@ -174,8 +176,8 @@ class TimeSeriesAnalyzer:
         else:
             logging.info(f"{name} не стационарен (p-value >= 0.05), требуется дифференцирование")
 
-        output_path = os.path.join(self.graphics_dir, f"{name}_adf_test.txt")
-        os.makedirs(self.graphics_dir, exist_ok=True)
+        output_path = os.path.join(f"{self.graphics_dir}/stationarity/", f"{name}_adf_test.txt")
+        os.makedirs(f"{self.graphics_dir}/stationarity/", exist_ok=True)
         with open(output_path, 'w') as f:
             f.write(f"ADF тест для {name}:\n")
             f.write(f"ADF Statistic: {adf_statistic:.4f}\n")
@@ -204,27 +206,61 @@ class TimeSeriesAnalyzer:
 
         return diff_series, d
 
-    def plot_acf_pacf(self, series, lags=40, title="Series"):
+    def plot_acf_pacf(self, series, title="Series"):
         series = series.dropna()
-
+        lags = self.config.get('preprocessing', {}).get('acf_pacf_lags', 720) if self.config else 720
         if len(series) < lags:
             logging.warning(f"Слишком мало данных для построения ACF/PACF: {len(series)} наблюдений")
-            return
+            lags = len(series) - 1
 
-        plt.figure(figsize=(12, 6))
 
-        plt.subplot(1, 2, 1)
-        plot_acf(series, lags=lags, ax=plt.gca())
-        plt.title(f"ACF для {title}")
+        plt.figure(figsize=(24, 16))
 
-        plt.subplot(1, 2, 2)
-        plot_pacf(series, lags=lags, ax=plt.gca())
-        plt.title(f"PACF для {title}")
+        # ACF Plot (сверху)
+        plt.subplot(2, 1, 1)
+        plot_acf(series, lags=lags, ax=plt.gca(), alpha=0.05, marker='o', markersize=4)
+        plt.title(f"ACF для {title}", fontsize=16, pad=15)
+        plt.xlabel("Лаги (часы)", fontsize=14)
+        plt.ylabel("Автокорреляция", fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+        plt.axhline(y=-1.96/np.sqrt(len(series)), color='gray', linestyle='--', alpha=0.5)
+        plt.axhline(y=1.96/np.sqrt(len(series)), color='gray', linestyle='--', alpha=0.5)
+        plt.fill_between(range(lags + 1), -1.96/np.sqrt(len(series)), 1.96/np.sqrt(len(series)),
+                         color='lightblue', alpha=0.3, label='95% доверительный интервал')
+        plt.legend(fontsize=12)
+        plt.tick_params(axis='both', labelsize=12)
+
+        significant_lags = [24, 168, 720]
+        for lag in significant_lags:
+            if lag <= lags:
+                plt.axvline(x=lag, color='red', linestyle=':', alpha=0.5)
+                plt.text(lag, 0.9, f'{lag}', rotation=90, fontsize=10, color='red', ha='right', va='top')
+
+
+        plt.subplot(2, 1, 2)
+        plot_pacf(series, lags=lags, ax=plt.gca(), alpha=0.05, marker='o', markersize=4)
+        plt.title(f"PACF для {title}", fontsize=16, pad=15)
+        plt.xlabel("Лаги (часы)", fontsize=14)
+        plt.ylabel("Частичная автокорреляция", fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+        plt.axhline(y=-1.96/np.sqrt(len(series)), color='gray', linestyle='--', alpha=0.5)
+        plt.axhline(y=1.96/np.sqrt(len(series)), color='gray', linestyle='--', alpha=0.5)
+        plt.fill_between(range(lags + 1), -1.96/np.sqrt(len(series)), 1.96/np.sqrt(len(series)),
+                         color='lightgreen', alpha=0.3, label='95% доверительный интервал')
+        plt.legend(fontsize=12)
+        plt.tick_params(axis='both', labelsize=12)
+
+        for lag in significant_lags:
+            if lag <= lags:
+                plt.axvline(x=lag, color='red', linestyle=':', alpha=0.5)
+                plt.text(lag, 0.9, f'{lag}', rotation=90, fontsize=10, color='red', ha='right', va='top')
 
         plt.tight_layout()
 
-        output_path = os.path.join(self.graphics_dir, f"{title}_acf_pacf.png")
-        os.makedirs(self.graphics_dir, exist_ok=True)
-        plt.savefig(output_path)
+        output_path = os.path.join(f"{self.graphics_dir}/stationarity/", f"{title}_acf_pacf.png")
+        os.makedirs(f"{self.graphics_dir}/stationarity/", exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         logging.info(f"Графики ACF и PACF сохранены в {output_path}")
